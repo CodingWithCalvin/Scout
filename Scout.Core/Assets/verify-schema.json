@@ -1,0 +1,125 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "candidate_checks": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "episode_title": {
+            "type": "string",
+            "enum": [
+              "PLACEHOLDER"
+            ]
+          },
+          "supporting_blocks": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "maxItems": 4
+          },
+          "contradicting_blocks": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "maxItems": 4
+          },
+          "event_comparison": {
+            "type": "string",
+            "maxLength": 450
+          },
+          "guide_event": {
+            "type": "string",
+            "enum": [
+              "OVERVIEW"
+            ]
+          }
+        },
+        "required": [
+          "episode_title",
+          "supporting_blocks",
+          "contradicting_blocks",
+          "event_comparison",
+          "guide_event"
+        ]
+      }
+    },
+    "assessment": {
+      "type": "string",
+      "enum": [
+        "supported",
+        "uncertain",
+        "non_episode"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 650
+    },
+    "matches": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "episode_title": {
+            "type": "string",
+            "enum": [
+              "PLACEHOLDER"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 450
+          }
+        },
+        "required": [
+          "episode_title",
+          "reason"
+        ]
+      }
+    },
+    "alternatives": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "episode_title": {
+            "type": "string",
+            "enum": [
+              "PLACEHOLDER"
+            ]
+          },
+          "reason_against": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "episode_title",
+          "reason_against"
+        ]
+      }
+    }
+  },
+  "required": [
+    "candidate_checks",
+    "assessment",
+    "summary",
+    "matches",
+    "alternatives"
+  ]
+}

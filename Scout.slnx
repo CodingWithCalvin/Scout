@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Scout.Core/Scout.Core.csproj" />
+  <Project Path="Scout.Desktop/Scout.Desktop.csproj" />
+  <Project Path="Scout.Tests/Scout.Tests.csproj" />
+</Solution>
