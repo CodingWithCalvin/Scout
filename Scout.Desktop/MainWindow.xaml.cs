@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using Scout.Core;
@@ -20,7 +21,8 @@ public partial class MainWindow : Window
         LoadSettings();workspaces.ReadAll(true);RefreshHistory();ShowPage("Session");Closing+=OnClosing;
     }
     private void ShowPage(string name) {
-        GuideStatus.Text=File.Exists(catalogPath)?"Saved with this run. New runs reuse a private copy of this guide.":"No episode guide saved yet. Import a guide to begin; automatic guide fetching is not available yet.";
+        if(name=="Settings"){NamingChanged(this,new RoutedEventArgs());RefreshManagedRuntime();}
+        GuideStatus.Text=File.Exists(catalogPath)?"Saved with this run. New runs reuse a private copy of this guide.":"No episode guide saved yet. Select a catalog show and download its guide, or import a JSON guide.";
         if(name=="Session"&&workspace!=null)name="Library";
         foreach(var item in new[]{(NavLibrary,"Library"),(NavResults,"Results"),(NavPreview,"Preview"),(NavActivity,"Activity")})
             item.Item1.Style=(Style)FindResource(item.Item2==name?"ScoutTabActive":"ScoutTab");
@@ -64,7 +66,10 @@ public partial class MainWindow : Window
             if(Path.GetFileName(root).StartsWith("Season ",StringComparison.OrdinalIgnoreCase)||Path.GetFileName(root).Equals("Specials",StringComparison.OrdinalIgnoreCase))root=Path.GetDirectoryName(root)!;
             LibraryPath.Text=root;SeriesName.Text=Path.GetFileName(root).Split(" {")[0];
         }
-        if(workspace!=null)LibraryPath.Text=workspace.Library;
+        if(workspace!=null){LibraryPath.Text=workspace.Library;
+            if(loaded["series_identity"]!=null)workspace.SeriesIdentity=loaded["series_identity"]!.Deserialize<SeriesIdentity>(Data.Options);
+            if(workspace.SeriesIdentity!=null)SeriesName.Text=workspace.SeriesIdentity.Name;
+        }
         outputPath=Path.GetDirectoryName(reportPath)!;catalogPath="";
         var catalog=Path.Combine(outputPath,"catalog.json");if(File.Exists(catalog))catalogPath=catalog;
         ResultNote.Text=$"{groups.Count(g=>g.Feature)} non-episode feature(s) · select a row for dialogue evidence";
@@ -82,7 +87,19 @@ public partial class MainWindow : Window
     }
     private void FilterChanged(object sender,SelectionChangedEventArgs e)=>FilterRows();
     private void SearchChanged(object sender,TextChangedEventArgs e)=>FilterRows();
-    private void ResultSelected(object sender,SelectionChangedEventArgs e){if(Evidence!=null)Evidence.Text=(ResultsGrid.SelectedItem as RecordingGroup)?.Detail??"";}
+    private void ClearEvidence() {
+        Evidence.Document.Blocks.Clear();EvidenceAssessment.Text="Select a recording to review";EvidenceSuggestion.Text="";
+    }
+    private void ResultSelected(object sender,SelectionChangedEventArgs e) {
+        if(Evidence==null)return;ClearEvidence();
+        if(ResultsGrid.SelectedItem is not RecordingGroup group)return;
+        var review=EvidenceReview.Create(group);EvidenceAssessment.Text=review.Assessment;EvidenceSuggestion.Text=review.Suggestion;
+        foreach(var section in review.Sections) {
+            Evidence.Document.Blocks.Add(new System.Windows.Documents.Paragraph(new System.Windows.Documents.Run(section.Heading)){FontWeight=FontWeights.SemiBold,Foreground=System.Windows.Media.Brushes.LightSteelBlue,Margin=new Thickness(0,16,0,6)});
+            Evidence.Document.Blocks.Add(new System.Windows.Documents.Paragraph(new System.Windows.Documents.Run(section.Text)){Margin=new Thickness(0,0,0,10),LineHeight=22});
+        }
+        Evidence.ScrollToHome();
+    }
     private void BrowseLibrary(object sender,RoutedEventArgs e)=>NewWorkspace(sender,e);
     private void BrowseCatalog(object sender,RoutedEventArgs e) {
         if(operation!=null||workspace==null)return;
@@ -100,7 +117,7 @@ public partial class MainWindow : Window
         try {Data.Read(path);if(workspace.Status!="Draft")NewRun(null,null);dialoguePath=path;SaveDraft();}catch(Exception ex){Error(ex);}
     }
     private void SetBusy(bool value) {
-        DeleteRunButton.IsEnabled=!value;UndoDeleteButton.IsEnabled=!value;HistoryList.IsEnabled=!value;RunHistory.IsEnabled=!value;SettingsPage.IsEnabled=!value;LibraryPage.IsEnabled=!value;
+        DeleteRunButton.IsEnabled=!value;UndoDeleteButton.IsEnabled=!value;HistoryList.IsEnabled=!value;RunHistory.IsEnabled=!value;SettingsPage.IsEnabled=!value||settingsDownload;SettingsTabs.IsEnabled=!value;LibraryPage.IsEnabled=!value;
         IdentifyButton.IsEnabled=!value;PreviewButton.IsEnabled=!value;CancelButton.IsEnabled=value;Progress.IsIndeterminate=value;
     }
     private void Log(string line){ActivityLog.AppendText(line+Environment.NewLine);ActivityLog.ScrollToEnd();Status.Text=line;RecordEvent(line);}
@@ -112,19 +129,27 @@ public partial class MainWindow : Window
             if(string.IsNullOrWhiteSpace(preferences.Model))throw new ArgumentException("Choose a model ID in Settings.");
             string? key=preferences.Provider is "openai" or "compatible"?settingsStore.ReadKey(preferences.CredentialId):null;
             ConnectionPolicy.Validate(preferences.Provider,preferences.Endpoint,preferences.AllowCloudDialogue,key);
-            if(!File.Exists(catalogPath))throw new ArgumentException("This Scout needs an episode guide before its first run. Import one in Settings > Usage and tools > Advanced run data.");
-            Data.Catalog(catalogPath);
+            if(workspace==null)throw new ArgumentException("Create or select a Scout first.");
+            if(!File.Exists(catalogPath)&&workspace.SeriesIdentity==null)throw new ArgumentException("Select a show or import an episode guide before identifying episodes.");
             if(!Directory.Exists(LibraryPath.Text)||PreviewPlanner.Within(outputPath,LibraryPath.Text))throw new ArgumentException("The source folder must exist and must be separate from internal Scout storage.");
+            var selectedFiles=ChooseVideos();if(selectedFiles==null)return;
             if(workspace==null||workspace.Status!="Draft") {
                 var series=SeriesName.Text;var library=LibraryPath.Text;var guide=catalogPath;var cached=dialoguePath;
                 CreateRun(library);SeriesName.Text=series;LibraryPath.Text=library;catalogPath=guide;dialoguePath=cached;
             }
-            SaveDraft();workspace!.Status="Running";workspace.Model=preferences.Model;workspace.Provider=preferences.Provider;
-            catalogPath=workspaces.SaveCatalog(workspace,catalogPath);
+            workspace!.SelectedFiles=selectedFiles;SaveDraft();workspace.Status="Running";workspace.Model=preferences.Model;workspace.Provider=preferences.Provider;
+            operation=new();SetBusy(true);ShowPage("Activity");var progress=new Progress<string>(Log);var token=operation.Token;
+            var guideTarget=File.Exists(catalogPath)?catalogPath:Path.Combine(outputPath,"catalog.json");
+            using(var metadataHttp=MetadataHttp()) {
+                var identity=workspace.SeriesIdentity;
+                if(!File.Exists(guideTarget))Log("Downloading the episode guide for "+identity!.Label+"…");
+                await EpisodeGuidePreparation.EnsureAsync(guideTarget,identity,identity==null?null:CatalogClient(metadataHttp,identity.Provider),token);
+            }
+            catalogPath=workspaces.SaveCatalog(workspace,guideTarget);
+            Log($"Identifying {selectedFiles.Count} selected videos from dialogue.");
             RecordEvent($"Started with {preferences.Provider} / {preferences.Model}.");
             var root=LibraryPath.Text;var catalog=catalogPath;var output=outputPath;
             var dialogue=string.IsNullOrWhiteSpace(dialoguePath)?null:dialoguePath;
-            operation=new();SetBusy(true);ShowPage("Activity");var progress=new Progress<string>(Log);var token=operation.Token;
             if(preferences.Provider=="managed") {
                 if(!File.Exists(preferences.ModelFile)&&preferences.AutoDownloadMissing) {
                     var profile=ModelDownloads.Profiles.Single(p=>p.Id==preferences.DownloadProfile);
@@ -135,14 +160,14 @@ public partial class MainWindow : Window
                 runtime=await LocalRuntime.StartAsync(preferences,progress,token);
             }
             string endpoint=preferences.Provider=="managed"?$"http://127.0.0.1:{new Uri(preferences.LocalEndpoint).Port}/v1/chat/completions":preferences.Endpoint;
-            var settings=new MatchSettings(root,catalog,output,preferences.Model,endpoint,preferences.Ffmpeg,preferences.Ffprobe,dialogue);
+            var settings=new MatchSettings(root,catalog,output,preferences.Model,endpoint,preferences.Ffmpeg,preferences.Ffprobe,dialogue,selectedFiles,workspace.SeriesIdentity);
             using var handler=new HttpClientHandler {AllowAutoRedirect=false};
             using var http=new HttpClient(handler){Timeout=TimeSpan.FromSeconds(preferences.RequestTimeoutSeconds)};
             matcher=new DialogueMatcher(http,new InferenceOptions{Provider=preferences.Provider,ApiKey=key,AllowCloudDialogue=preferences.AllowCloudDialogue,MaxOutputTokens=preferences.MaxOutputTokens,MaxRequests=preferences.MaxRequestsPerRun});
             usageOutput=Path.Combine(output,"usage.json");
             var pipeline=new MediaPipeline(matcher);
             var path=await Task.Run(()=>pipeline.RunAsync(settings,progress,token),token);
-            LoadReport(path);Status.Text="Matching complete. Unresolved files are held for review.";
+            LoadReport(path);ShowPage("Results");Status.Text="Matching complete. Unresolved files are held for review.";
         }catch(OperationCanceledException){if(workspace!=null)workspace.Status="Cancelled";Log("Cancelled. Completed results remain saved; videos are untouched.");}
         catch(Exception ex){if(workspace!=null){workspace.Status="Needs attention";RecordEvent(ex.Message);}Error(ex);}
         finally{
@@ -162,10 +187,11 @@ public partial class MainWindow : Window
             if(PreviewPlanner.Within(output,root))throw new ArgumentException("Preview output must be outside the video library.");
             var catalog=string.IsNullOrWhiteSpace(catalogPath)?[]:Data.Catalog(catalogPath);
             var snapshot=report.DeepClone().AsObject();
+            var naming=appSettings.Naming;
             operation=new();SetBusy(true);CancelButton.IsEnabled=false;Status.Text="Checking source files and destinations…";
-            var plan=await Task.Run(()=>PreviewPlanner.Create(snapshot,root,series,catalog));
+            var plan=await Task.Run(()=>PreviewPlanner.Create(snapshot,root,series,catalog,naming:naming,identity:workspace?.SeriesIdentity));
             previewHtml=PreviewPlanner.Write(plan,output);PreviewGrid.ItemsSource=plan.Items.Select(i=>new PreviewRow(i,Path.GetRelativePath(plan.LibraryRoot,i.Source),i.Destination is null?"Leave in place":Path.GetRelativePath(plan.LibraryRoot,i.Destination))).ToList();
-            PreviewSummary.Text=string.Join("   /   ",plan.Summary.Select(p=>$"{p.Value} {p.Key}"))+"   ·   No files changed";
+            PreviewSummary.Text=string.Join("   /   ",plan.Items.GroupBy(i=>i.Action=="hold"?"Held":i.Change).Select(g=>$"{g.Count()} {g.Key}"))+"   ·   No files changed";
             PreviewDetails.Text=string.Join(Environment.NewLine,plan.NotIdentified.Select(ep=>"Not identified: "+ep.Code+" — "+ep.Title));
             if(workspace!=null){workspace.Preview=previewHtml;RecordEvent("Move preview generated. No media files changed.");RefreshHistory();}
             ShowPage("Preview");Status.Text="Preview ready. No media files or folders changed.";
@@ -173,7 +199,7 @@ public partial class MainWindow : Window
         finally{operation?.Dispose();operation=null;SetBusy(false);}
     }
     private void PreviewSelected(object sender,SelectionChangedEventArgs e) {
-        if(PreviewGrid.SelectedItem is PreviewRow selected) { var item=selected.Item; PreviewDetails.Text=item.Source+"\n→ "+(item.Destination??"Leave in place")+"\n"+string.Join(" ",item.BlockedReasons.Concat(item.Notes))+"\n"+item.FeatureDescription; }
+        if(PreviewGrid.SelectedItem is PreviewRow selected) { var item=selected.Item; PreviewDetails.Text=item.Source+"\n→ "+(item.Destination??"Leave in place")+"\n"+item.Change+": "+item.Reason+"\n"+string.Join(" ",item.BlockedReasons.Concat(item.Notes))+"\n"+item.FeatureDescription; }
     }
     private void OpenPreview(object sender,RoutedEventArgs e) {
         if(previewHtml!=null)try{Process.Start(new ProcessStartInfo(previewHtml){UseShellExecute=true});}catch(Exception ex){Error(ex);}
@@ -183,7 +209,15 @@ public partial class MainWindow : Window
         if(operation==null)SaveDraft();
         if(operation!=null){e.Cancel=true;MessageBox.Show(this,"Cancel processing and let it stop before closing.","Processing is running");}
     }
-    private void Error(Exception ex){Status.Text="Needs attention";MessageBox.Show(this,ex.Message,"Scout",MessageBoxButton.OK,MessageBoxImage.Warning);}
+    private void Error(Exception ex){
+        Status.Text="Needs attention";
+        var message=ex is UnauthorizedAccessException?"Scout cannot access a required folder. Check the source drive and app-data permissions. Your media files have not been changed.\n\n"+ex.Message:ex.Message;
+        try {
+            var directory=Environment.GetEnvironmentVariable("SCOUT_SETTINGS")??Path.Combine(SettingsStore.DefaultDirectory,"UI-Trial");
+            Directory.CreateDirectory(directory);File.AppendAllText(Path.Combine(directory,"errors.log"),DateTimeOffset.Now+"\n"+ex+"\n\n");
+        }catch(IOException){}catch(UnauthorizedAccessException){}
+        MessageBox.Show(this,message,"Scout",MessageBoxButton.OK,MessageBoxImage.Warning);
+    }
 }
 
-public sealed record PreviewRow(PlanItem Item,string Source,string Destination) { public string Category=>Item.Category;public string Action=>Item.Action; }
+public sealed record PreviewRow(PlanItem Item,string Source,string Destination) { public string Category=>Item.Category;public string Action=>Item.Action;public string Change=>Item.Change; }

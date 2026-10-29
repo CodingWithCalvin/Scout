@@ -7,6 +7,7 @@ public static class CollectionResolver
 {
     public static string Hash(string text)=>Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     public static string? FingerprintKey(JsonNode? fp) {
+        if(fp.Text("algorithm")=="full-file-sha256-v1")return Regex.IsMatch(fp.Text("sha256"),"^[0-9a-f]{64}$")?"file:"+fp.Text("sha256"):null;
         if(fp.Text("algorithm")!="primary-packets-sha256-v1") return null;
         var video=fp.Text("video");var audio=fp.Text("audio");
         return Regex.IsMatch(video,"^[0-9a-f]{64}$")&&Regex.IsMatch(audio,"^[0-9a-f]{64}$")?video+audio:null;

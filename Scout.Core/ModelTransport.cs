@@ -19,6 +19,14 @@ public sealed class ModelTransport(HttpClient client,InferenceOptions options)
  public string CacheScope=>$"{options.Provider}|{options.MaxOutputTokens}|responses-v1";
  public UsageSnapshot Usage=>new(requests,inputTokens,outputTokens,options.Provider);
  public Uri ValidateEndpoint(string endpoint)=>ConnectionPolicy.Validate(options.Provider,endpoint,options.AllowCloudDialogue,options.ApiKey);
+ private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct) {
+  try{return await client.SendAsync(request,ct);}
+  catch(HttpRequestException ex) when(options.Provider is "local" or "managed"&&ex.InnerException is System.Net.Sockets.SocketException socket&&socket.SocketErrorCode==System.Net.Sockets.SocketError.ConnectionRefused) {
+   throw new HttpRequestException(options.Provider=="local"
+    ?"No local model server is listening. Settings > Connection is set to connect to an already-running server. Choose Let Scout Launch my Model to use a downloaded GGUF, or start your external server and check its endpoint."
+    :"The Scout-managed model server stopped accepting connections. Check model memory requirements, GPU layers and runtime compatibility before retrying.",ex);
+  }
+ }
  public async Task<JsonObject> CompleteAsync(string model,string endpoint,string system,JsonObject source,JsonNode schema,CancellationToken ct) {
   var uri=ValidateEndpoint(endpoint);
   if(options.MaxOutputTokens<512||options.MaxOutputTokens>65536||options.MaxRequests<2)throw new ArgumentException("Invalid inference limits.");
@@ -39,7 +47,7 @@ public sealed class ModelTransport(HttpClient client,InferenceOptions options)
   using var request=new HttpRequestMessage(HttpMethod.Post,uri){Content=JsonContent.Create(payload)};
   if(!local)request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",options.ApiKey);
   requests++;
-  using var response=await client.SendAsync(request,ct);
+  using var response=await SendAsync(request,ct);
   if(!response.IsSuccessStatusCode)throw new HttpRequestException($"Model service returned HTTP {(int)response.StatusCode}. Check provider, model access, key and limits.",null,response.StatusCode);
   var body=JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))??throw new InvalidDataException("Empty model response.");
   var usage=body["usage"];

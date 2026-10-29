@@ -11,7 +11,7 @@ public static class ModelDownloads
   new("qwen36-35b","Qwen3.6 35B A3B · UD Q4_K_M","Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",22134528992,
   "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61",
   "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/a483e9e6cbd595906af30beda3187c2663a1118c/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",false,
-  "Tested on Victorious; not approved as a general default. Requires substantial RAM. Runtime supplied separately.")
+  "Tested on Victorious; not approved as a general default. Requires substantial RAM. Managed llama.cpp b11908 runtime downloaded automatically.")
  ];
  public static void CheckPolicy(ModelProfile p,AppSettings s) {
   if(!s.AllowDownloads)throw new InvalidOperationException("Model downloads are disabled in Settings.");

@@ -13,12 +13,16 @@ public sealed class PlanItem
     public required string GroupId {get;init;}
     public string? PrimarySource {get;init;}
     public string Action {get;set;}="hold";
+    public string Change {get;set;}="Unresolved";
+    public string Reason {get;set;}="No resolved episode assignment.";
     public List<string> BlockedReasons {get;init;}=[];
     public List<string> Notes {get;init;}=[];
     public string? FeatureDescription {get;init;}
 }
 public sealed record MovePlan(string LibraryRoot,string Series,List<PlanItem> Items,List<Episode> NotIdentified)
 {
+    public NamingOptions Naming {get;init;}=new();
+    public SeriesIdentity? SeriesIdentity {get;init;}
     public string Mode=>"preview_only";
     public bool MediaFilesModified=>false;
     public Dictionary<string,int> Summary=>Items.GroupBy(i=>i.Category).ToDictionary(g=>g.Key,g=>g.Count());
@@ -49,15 +53,18 @@ public static class PreviewPlanner
             if((File.Exists(current)||Directory.Exists(current))&&(File.GetAttributes(current)&FileAttributes.ReparsePoint)!=0)return true;
         return false;
     }
-    public static MovePlan Create(JsonObject report,string root,string series,IReadOnlyList<Episode>? catalog=null,bool checkSources=true) {
+    public static MovePlan Create(JsonObject report,string root,string series,IReadOnlyList<Episode>? catalog=null,bool checkSources=true,NamingOptions? naming=null,SeriesIdentity? identity=null) {
+        naming??=new();naming.Validate();identity?.Validate();
         root=Path.GetFullPath(root);series=SafeName(series);
         if(string.IsNullOrWhiteSpace(series))throw new ArgumentException("Series name required.");
         var items=new List<PlanItem>();
         foreach(var group in CollectionResolver.Resolve(report)) {
-            var e=group.Episode;string folder=e is null?"Extras":$"Season {e.Season:00}";
-            string basename=SafeName(e is null?series+" - Non-episode feature":$"{series} - {e.Code} - {e.Title}");
+            var e=group.Episode;string folder=e is null?"Extras":naming.Folder(series,e,identity);
+            string basename=e is null?SafeName(series+" - Non-episode feature"):naming.FileName(series,e,identity);
             string Canonical(JsonObject r)=>Path.Combine(root,folder,basename+Path.GetExtension(r.Text("path")).ToLowerInvariant());
-            var rows=group.Rows.OrderByDescending(r=>e!=null&&Same(r.Text("path"),Canonical(r)))
+            bool CorrectName(string path)=>e!=null&&(string.Equals(Path.GetFileNameWithoutExtension(path),basename,StringComparison.OrdinalIgnoreCase)||NamingOptions.Inspect(path,series,e,identity).Correct);
+            bool CorrectFolder(string path)=>e!=null&&Path.GetDirectoryName(Path.GetDirectoryName(path)) is string parent&&Same(parent,root)&&NamingOptions.CorrectFolder(path,series,e,naming,identity);
+            var rows=group.Rows.OrderByDescending(r=>e!=null&&(Same(r.Text("path"),Canonical(r))||naming.PreserveCorrectNames&&CorrectName(r.Text("path"))&&CorrectFolder(r.Text("path"))))
                 .ThenByDescending(r=>r.Array("candidates").FirstOrDefault()?["filename_evidence"].Bool("number_match")==true&&r.Array("candidates").FirstOrDefault()?["filename_evidence"].Bool("title_match")==true)
                 .ThenBy(r=>r.Text("path"),StringComparer.OrdinalIgnoreCase).ToList();
             for(int index=0;index<rows.Count;index++) {
@@ -65,14 +72,36 @@ public static class PreviewPlanner
                 var token=CollectionResolver.Hash(source.ToLowerInvariant())[..10];bool duplicate=index>0;
                 string? target=e is not null ? (duplicate?Path.Combine(root,"_Duplicates",folder,basename+$" [duplicate-{token}]"+suffix):Canonical(row)):
                     group.Feature?Path.Combine(duplicate?Path.Combine(root,"_Duplicates","Extras"):Path.Combine(root,"Extras"),basename+$" [{token}]"+suffix):null;
+                if(e!=null&&!duplicate&&naming.PreserveCorrectNames) {
+                    var destinationFolder=CorrectFolder(source)?Path.GetDirectoryName(source)!:Path.Combine(root,folder);
+                    target=Path.Combine(destinationFolder,CorrectName(source)?Path.GetFileName(source):basename+suffix);
+                }
                 var item=new PlanItem {Source=source,Destination=target,Episode=e,GroupId=group.Id,PrimarySource=group.Duplicate?rows[0].Text("path"):null,
                     Category=target is null?"unresolved":duplicate?"duplicate":e is not null?"episode":"feature",
                     FeatureDescription=group.Feature?row["reasoning"].Text("summary"):null,
                     Action=target is null?"hold":Same(source,target)?"unchanged":"rename/move"};
+                if(target!=null) {
+                    bool moved=!Same(Path.GetDirectoryName(source)!,Path.GetDirectoryName(target)!);
+                    bool renamed=!string.Equals(Path.GetFileName(source),Path.GetFileName(target),StringComparison.OrdinalIgnoreCase);
+                    if(duplicate){item.Change="Duplicate handling";item.Reason="Retain this duplicate separately from the primary recording.";}
+                    else if(e==null){item.Change="Feature handling";item.Reason="Store this non-episode feature separately.";}
+                    else if(!moved&&!renamed){item.Change="Unchanged";item.Reason="Episode number, title and season folder already agree with the match.";}
+                    else {
+                        bool correct=CorrectName(source);
+                        item.Change=renamed&&!correct?(NamingOptions.Inspect(source,series,e).HasNumber?"Episode correction":"Episode naming"):renamed||moved&&CorrectFolder(source)?"Formatting only":"Folder move";
+                        item.Reason=item.Change switch {
+                            "Episode correction"=>$"Filename episode information disagrees with the matched {e.Code} — {e.Title}.",
+                            "Episode naming"=>$"Add the matched episode identity: {e.Code} — {e.Title}.",
+                            "Formatting only"=>"Episode identity already agrees; apply the selected naming format.",
+                            _=>"Preserve the filename and place it in the selected season folder."
+                        };
+                        if(moved&&item.Change!="Folder move")item.Reason+=" Also move to the selected season folder.";
+                    }
+                }
                 if(!Within(source,root))item.BlockedReasons.Add("Source is outside the selected library.");
                 if(target is not null&&(!Within(target,root)||HasReparseAncestor(target)||HasReparseAncestor(source)))
                     item.BlockedReasons.Add("Path leaves the library or traverses a junction/symbolic link; review required.");
-                if(duplicate&&target is not null)item.Notes.Add("Identical primary video/audio. Retain this copy; other tracks and metadata can differ.");
+                if(duplicate&&target is not null)item.Notes.Add(row["primary_fingerprint"].Text("algorithm")=="full-file-sha256-v1"?"Exact byte-for-byte duplicate. Retain this copy separately.":"Identical primary video/audio. Retain this copy; other tracks and metadata can differ.");
                 if(group.Duplicate)item.Notes.Add("Primary chosen by canonical path, filename agreement, then path order; not a quality ranking.");
                 if((row["duration"]?.GetValue<double>()??0)>2100)item.Notes.Add("Long recording: leading episode only; additional segments may be present.");
                 if(target is null)item.Notes.Add("Unresolved match: leave in place.");
@@ -106,7 +135,7 @@ public static class PreviewPlanner
             }
         }while(changed);
         var assigned=items.Where(i=>i.Episode!=null).Select(i=>i.Episode!.Id).ToHashSet();
-        return new(root,series,items,(catalog??[]).Where(e=>e.Season>0&&!assigned.Contains(e.Id)).ToList());
+        return new(root,series,items,(catalog??[]).Where(e=>e.Season>0&&!assigned.Contains(e.Id)).ToList()){SeriesIdentity=identity,Naming=new(){PreserveCorrectNames=naming.PreserveCorrectNames,FileTemplate=naming.FileTemplate,SeasonTemplate=naming.SeasonTemplate}};
     }
     public static string Write(MovePlan plan,string output) {
         if(Within(output,plan.LibraryRoot))throw new InvalidOperationException("Preview output must be outside the video library.");
@@ -115,7 +144,7 @@ public static class PreviewPlanner
         string E(string? s)=>WebUtility.HtmlEncode(s??"");
         foreach(var group in plan.Items.GroupBy(i=>i.Category)) {
             h.Append("<h2>").Append(E(group.Key)).Append(" · ").Append(group.Count()).Append("</h2><table><tr><th>Current file</th><th>Proposed location</th><th>Action / evidence</th></tr>");
-            foreach(var i in group)h.Append("<tr><td>").Append(E(i.Source)).Append("</td><td>").Append(E(i.Destination??"Leave in place")).Append("</td><td>").Append(E(i.Action)).Append("<br>").Append(E(string.Join(" ",i.BlockedReasons.Concat(i.Notes)))).Append("<br>").Append(E(i.FeatureDescription)).Append("</td></tr>");
+            foreach(var i in group)h.Append("<tr><td>").Append(E(i.Source)).Append("</td><td>").Append(E(i.Destination??"Leave in place")).Append("</td><td>").Append(E(i.Action+" · "+i.Change)).Append("<br>").Append(E(i.Reason)).Append("<br>").Append(E(string.Join(" ",i.BlockedReasons.Concat(i.Notes)))).Append("<br>").Append(E(i.FeatureDescription)).Append("</td></tr>");
             h.Append("</table>");
         }
         h.Append("<h2>Not identified in this scan</h2><p>This does not prove absence: combined recordings may contain additional episodes.</p><ul>");

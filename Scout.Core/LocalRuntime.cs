@@ -7,12 +7,16 @@ public sealed class LocalRuntime : IAsyncDisposable
  private readonly Process process;
  private LocalRuntime(Process p){process=p;}
  public static async Task<LocalRuntime> StartAsync(AppSettings s,IProgress<string> progress,CancellationToken ct) {
-  if(!File.Exists(s.RuntimeExecutable)||!File.Exists(s.ModelFile))throw new FileNotFoundException("Choose an existing llama-server.exe and GGUF model in Settings.");
+  using var downloadHttp=new HttpClient{Timeout=TimeSpan.FromHours(12)};
+  if(!File.Exists(s.ModelFile)&&s.AutoDownloadMissing)
+   s.ModelFile=await ModelDownloads.DownloadAsync(ModelDownloads.Profiles.Single(p=>p.Id==s.DownloadProfile),s,downloadHttp,progress,ct);
+  if(!File.Exists(s.ModelFile))throw new FileNotFoundException("Choose a GGUF model or enable automatic model downloads in Settings.");
+  var executable=await RuntimeDownloads.EnsureAsync(s,downloadHttp,progress,ct);
   var uri=DialogueMatcher.LocalEndpoint(s.LocalEndpoint);
   using(var socket=new Socket(AddressFamily.InterNetwork,SocketType.Stream,ProtocolType.Tcp)) {
    try{socket.Bind(new IPEndPoint(IPAddress.Loopback,uri.Port));}catch(SocketException){throw new IOException("Local port occupied. Use the existing-endpoint mode or choose another port.");}
   }
-  var start=new ProcessStartInfo(s.RuntimeExecutable){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=Path.GetDirectoryName(Path.GetFullPath(s.RuntimeExecutable))!};
+  var start=new ProcessStartInfo(executable){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=Path.GetDirectoryName(Path.GetFullPath(executable))!};
   foreach(var arg in new[]{"-m",s.ModelFile,"--host","127.0.0.1","--port",uri.Port.ToString(),"-c",s.ContextSize.ToString(),"-ngl",s.GpuLayers.ToString(),"-np","1","-t",s.CpuThreads.ToString(),"-tb",s.CpuThreads.ToString(),"--alias",s.LocalModel,"--reasoning","off"})start.ArgumentList.Add(arg);
   var p=Process.Start(start)??throw new IOException("Cannot start local runtime.");var runtime=new LocalRuntime(p);
   p.OutputDataReceived+=(_,_)=>{};p.ErrorDataReceived+=(_,_)=>{};p.BeginOutputReadLine();p.BeginErrorReadLine();

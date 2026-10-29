@@ -46,6 +46,5 @@ public sealed class RecordingGroup
     public string Title=>Episode?.Title ?? (Feature?"Non-episode feature":"Unresolved");
     public string Category=>Episode is not null?"Episode":Feature?"Feature":"Unresolved";
     public int Copies=>Rows.Count;
-    public string Detail=>string.Join("\n\n",Rows.Select(r=>r.Text("path")+"\n"+r["reasoning"].Text("summary",r.Text("error"))+"\n"+
-        string.Join("\n",r.Array("candidates").SelectMany(c=>c.Array("evidence")).Select(e=>$"{e?["start"]}s  {e.Text("text")}"))));
+    public string Detail {get {var review=EvidenceReview.Create(this);return review.Assessment+"\n"+review.Suggestion+"\n\n"+string.Join("\n\n",review.Sections.Select(s=>s.Heading+"\n"+s.Text));}}
 }

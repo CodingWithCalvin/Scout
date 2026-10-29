@@ -8,6 +8,8 @@ namespace Scout.Core;
 
 public sealed class AppSettings
 {
+    public NamingOptions Naming {get;set;}=new();
+    public string MetadataProvider {get;set;}="tvdb";
     public string Provider {get;set;}="local";
     public string LocalModel {get;set;}="";
     public string LocalEndpoint {get;set;}="http://127.0.0.1:18765/v1/chat/completions";
@@ -17,7 +19,6 @@ public sealed class AppSettings
     public bool AllowCloudDialogue {get;set;}
     public string ModelDirectory {get;set;}=Path.Combine(SettingsStore.DefaultDirectory,"models");
     public string ModelFile {get;set;}="";
-    public string RuntimeExecutable {get;set;}="";
     public bool AllowDownloads {get;set;}
     public bool AutoDownloadMissing {get;set;}
     public bool AllowExperimental {get;set;}
@@ -34,6 +35,8 @@ public sealed class AppSettings
     [JsonIgnore] public string Model=>Provider switch {"openai"=>OpenAiModel,"compatible"=>CompatibleModel,_=>LocalModel};
     [JsonIgnore] public string CredentialId=>Provider+"|"+Endpoint.Trim().TrimEnd('/');
     public void Validate() {
+        Naming.Validate();
+        if(MetadataProvider is not ("tvdb" or "tmdb" or "tvmaze"))throw new ArgumentException("Unknown metadata provider.");
         if(Provider is not ("local" or "managed" or "openai" or "compatible"))throw new ArgumentException("Unknown model provider.");
         if(CpuThreads<1||CpuThreads>256||GpuLayers<0||GpuLayers>999||ContextSize<4096||ContextSize>1048576)throw new ArgumentException("Check CPU threads, GPU layers and context size.");
         if(MaxOutputTokens<512||MaxOutputTokens>65536||RequestTimeoutSeconds<30||RequestTimeoutSeconds>7200||MaxRequestsPerRun<2||MaxRequestsPerRun>10000)
@@ -46,6 +49,10 @@ public sealed class AppSettings
 }
 public static class ConnectionPolicy
 {
+    public static string ServerProvider(string endpoint) {
+        if(Uri.TryCreate(endpoint,UriKind.Absolute,out var uri)&&uri.Host is "localhost" or "127.0.0.1" or "[::1]" or "::1") {DialogueMatcher.LocalEndpoint(endpoint);return "local";}
+        CloudUri(endpoint);return "compatible";
+    }
     public static Uri CloudUri(string endpoint) {
         if(!Uri.TryCreate(endpoint,UriKind.Absolute,out var uri)||uri.Scheme!="https"||!string.IsNullOrEmpty(uri.UserInfo)||!string.IsNullOrEmpty(uri.Query)||!string.IsNullOrEmpty(uri.Fragment))
             throw new ArgumentException("Cloud endpoints must use HTTPS without embedded credentials, query strings or fragments.");

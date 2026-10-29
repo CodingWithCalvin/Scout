@@ -19,6 +19,8 @@ public partial class MainWindow {
   } finally {openingWorkspace=false;}
   WorkspaceHeading.Text=workspace?.Name??"Your next Scout";
   WorkspaceSource.Text=workspace?.Library??"One source folder. Every run in one place.";
+  RefreshDiscovery();
+  NamingChanged(this,new RoutedEventArgs());
  }
  private void RecordEvent(string text) {
   if(workspace==null)return;
@@ -33,17 +35,22 @@ public partial class MainWindow {
  }
  private void NewWorkspace(object? sender,RoutedEventArgs? e) {
   if(operation!=null)return;
-  if(PickFolder("Choose the source video folder for this Scout") is not string folder)return;
-  var existing=workspaces.ReadAll().FirstOrDefault(x=>string.Equals(x.Library.TrimEnd(Path.DirectorySeparatorChar),folder.TrimEnd(Path.DirectorySeparatorChar),StringComparison.OrdinalIgnoreCase));
-  if(existing!=null){OpenSavedRun(existing);return;}
-  CreateRun(folder);
+  try {
+   if(PickFolder("Choose the source video folder for this Scout") is not string folder)return;
+   var existing=workspaces.ReadAll().FirstOrDefault(x=>string.Equals(x.Library.TrimEnd(Path.DirectorySeparatorChar),folder.TrimEnd(Path.DirectorySeparatorChar),StringComparison.OrdinalIgnoreCase));
+   if(existing!=null){OpenSavedRun(existing);return;}
+   CreateRun(folder);
+  }catch(Exception ex){Error(ex);}
  }
  private void CreateRun(string folder) {
-  SaveDraft();workspace=new(){Library=Path.GetFullPath(folder),Name=Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar)).Split(" {")[0]};workspaces.Save(workspace);
+  PersistSetup();SaveDraft();
+  var inherited=workspace!=null&&string.Equals(Path.GetFullPath(workspace.Library),Path.GetFullPath(folder),StringComparison.OrdinalIgnoreCase)?workspace.RestoreSetup() with {}:null;
+  var sample=inherited!=null?workspace!.DiscoveryFiles.ToList():new List<string>();
+  var created=workspaces.CreateRun(folder);created.Setup=inherited;created.DiscoveryFiles=sample;workspaces.Save(created);workspace=created;
   report=null;reportPath=null;previewHtml=null;groups=[];
   SeriesName.Text=workspace.Name;LibraryPath.Text=workspace.Library;LibraryPath.IsReadOnly=true;catalogPath="";dialoguePath="";
   outputPath=workspaces.DirectoryFor(workspace);
-  ResultsGrid.ItemsSource=null;PreviewGrid.ItemsSource=null;Evidence.Clear();ActivityLog.Clear();
+  ResultsGrid.ItemsSource=null;PreviewGrid.ItemsSource=null;ClearEvidence();ActivityLog.Clear();
   FileCount.Text=EpisodeCount.Text=DuplicateCount.Text=ReviewCount.Text="—";
   PreviewSummary.Text="Generate a preview from this run's results.";PreviewDetails.Clear();
   SessionLog.Text="";RecordEvent("New run created for "+workspace.Library);
@@ -51,8 +58,10 @@ public partial class MainWindow {
  }
  private void NewRun(object? sender,RoutedEventArgs? e) {
   if(operation!=null||workspace==null)return;
-  var folder=workspace.Library;var series=SeriesName.Text;var catalog=catalogPath;var dialogue=dialoguePath;
-  CreateRun(folder);SeriesName.Text=series;catalogPath=File.Exists(catalog)?workspaces.SaveCatalog(workspace!,catalog):"";dialoguePath=dialogue;SaveDraft();ShowPage("Library");
+  try {
+   var folder=workspace.Library;var series=SeriesName.Text;var catalog=catalogPath;var dialogue=dialoguePath;var selection=workspace.SelectedFiles.ToList();
+   CreateRun(folder);workspace!.SelectedFiles=selection;SeriesName.Text=series;catalogPath=File.Exists(catalog)?workspaces.SaveCatalog(workspace!,catalog):"";dialoguePath=dialogue;SaveDraft();RefreshSelection();ShowPage("Library");
+  }catch(Exception ex){Error(ex);}
  }
  private void OpenRun(object sender,SelectionChangedEventArgs e) {
   if(!openingWorkspace&&operation==null&&RunHistory.SelectedItem is RunWorkspace run)OpenSavedRun(run);
@@ -65,7 +74,7 @@ public partial class MainWindow {
  private void OpenSavedRun(RunWorkspace chosen) {
   try {
    SaveDraft();workspace=chosen;openingWorkspace=true;
-   report=null;reportPath=null;previewHtml=null;groups=[];ResultsGrid.ItemsSource=null;PreviewGrid.ItemsSource=null;Evidence.Clear();
+   report=null;reportPath=null;previewHtml=null;groups=[];ResultsGrid.ItemsSource=null;PreviewGrid.ItemsSource=null;ClearEvidence();
    PreviewSummary.Text="Generate a preview from these results.";PreviewDetails.Clear();
    FileCount.Text=EpisodeCount.Text=DuplicateCount.Text=ReviewCount.Text="—";
    if(File.Exists(chosen.Report))LoadReport(chosen.Report);
@@ -83,7 +92,7 @@ public partial class MainWindow {
   try {
    var removed=workspace;workspaces.DeleteRun(removed);deletedRun=removed;workspace=null;
    report=null;reportPath=null;previewHtml=null;groups=[];catalogPath="";dialoguePath="";outputPath="";
-   ResultsGrid.ItemsSource=null;PreviewGrid.ItemsSource=null;Evidence.Clear();ActivityLog.Clear();SessionLog.Text="";
+   ResultsGrid.ItemsSource=null;PreviewGrid.ItemsSource=null;ClearEvidence();ActivityLog.Clear();SessionLog.Text="";
    var remaining=workspaces.ReadAll();var next=remaining.FirstOrDefault(x=>string.Equals(x.Library,removed.Library,StringComparison.OrdinalIgnoreCase))??remaining.FirstOrDefault();
    if(next!=null)OpenSavedRun(next);else {RefreshHistory();ShowPage("Session");}
    UndoDeleteButton.Visibility=Visibility.Visible;Status.Text="Run deleted from history. Source videos unchanged.";

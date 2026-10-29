@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 namespace Scout.Core;
-public sealed record MatchSettings(string Root,string Catalog,string Output,string Model,string Endpoint,string Ffmpeg="ffmpeg",string Ffprobe="ffprobe",string? DialogueInput=null);
+public sealed record MatchSettings(string Root,string Catalog,string Output,string Model,string Endpoint,string Ffmpeg="ffmpeg",string Ffprobe="ffprobe",string? DialogueInput=null,IReadOnlyList<string>? SelectedFiles=null,SeriesIdentity? SeriesIdentity=null);
 public sealed class MediaPipeline(DialogueMatcher matcher)
 {
     public static async Task<string> ExecuteAsync(string exe,IEnumerable<string> args,CancellationToken ct) {
@@ -37,7 +37,8 @@ public sealed class MediaPipeline(DialogueMatcher matcher)
         var episodes=Data.Catalog(settings.Catalog);
         var cachedRows=settings.DialogueInput is null?new Dictionary<string,JsonObject>(StringComparer.OrdinalIgnoreCase):
             Data.Read(settings.DialogueInput).Array("files").ToDictionary(n=>Path.GetFullPath(n.Text("path")),n=>n!.AsObject(),StringComparer.OrdinalIgnoreCase);
-        var paths=Directory.EnumerateFiles(settings.Root,"*",SearchOption.AllDirectories).Where(p=>new[]{".mkv",".mp4",".avi",".m4v"}.Contains(Path.GetExtension(p).ToLowerInvariant())).Order(StringComparer.OrdinalIgnoreCase).ToList();
+        var paths=(settings.SelectedFiles??VideoSelection.Enumerate(settings.Root)).ToList();
+        if(paths.Any(p=>!File.Exists(p)||!PreviewPlanner.Within(p,settings.Root))||paths.Distinct(StringComparer.OrdinalIgnoreCase).Count()!=paths.Count)throw new InvalidDataException("Selected files must be distinct existing videos within this Scout.");
         if(paths.Count==0)throw new InvalidOperationException("No supported video files.");
         Directory.CreateDirectory(settings.Output);var cache=Path.Combine(settings.Output,"reasoning-cache");Directory.CreateDirectory(cache);
         var rows=new JsonArray();int index=0;
@@ -84,9 +85,9 @@ public sealed class MediaPipeline(DialogueMatcher matcher)
             catch(UsageLimitException){throw;}
             catch(Exception ex) {row["error"]=ex.Message;row["status"]="error";row["candidates"]=new JsonArray();progress.Report("Held for review: "+ex.Message);}
             rows.Add(row);
-            Data.Save(Path.Combine(settings.Output,"report.json"),new JsonObject {["files"]=rows.DeepClone(),["pipeline"]=DialogueMatcher.Version,["manual_corrections"]=false});
+            Data.Save(Path.Combine(settings.Output,"report.json"),new JsonObject {["files"]=rows.DeepClone(),["series_identity"]=JsonSerializer.SerializeToNode(settings.SeriesIdentity,Data.Options),["pipeline"]=DialogueMatcher.Version,["manual_corrections"]=false});
         }
-        Data.Save(Path.Combine(settings.Output,"catalog.json"),new{episodes});
+        Data.Save(Path.Combine(settings.Output,"catalog.json"),new{series_identity=settings.SeriesIdentity,episodes});
         return Path.Combine(settings.Output,"report.json");
     }
 }
