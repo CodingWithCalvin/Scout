@@ -33,7 +33,14 @@ public sealed class MetadataCatalog(HttpClient http,string provider,string? cred
     public string Provider=>provider;
     private string? token;
     private string Root=>provider switch {"tvdb"=>"https://api4.thetvdb.com/v4/","tmdb"=>"https://api.themoviedb.org/3/","tvmaze"=>"https://api.tvmaze.com/",_=>throw new ArgumentException("Unknown metadata provider.")};
-    private async Task<JsonNode?> Request(string path,CancellationToken ct)
+    private async Task<JsonNode?> Request(string path,CancellationToken ct) {
+        try{return await RequestCore(path,ct);}
+        catch(OperationCanceledException ex) when(!ct.IsCancellationRequested) {
+            if(ex.InnerException is TimeoutException)throw new TimeoutException($"The {provider.ToUpperInvariant()} metadata request timed out after {http.Timeout.TotalSeconds:0.###} seconds. Retry when the provider is available.",ex);
+            throw new IOException("The metadata request was interrupted without a user cancellation. Check the provider connection and retry.",ex);
+        }
+    }
+    private async Task<JsonNode?> RequestCore(string path,CancellationToken ct)
     {
         if(provider!="tvmaze"&&string.IsNullOrWhiteSpace(credential))throw new InvalidOperationException($"Configure {provider.ToUpperInvariant()} credentials in Settings > Show discovery first.");
         if(provider=="tvdb"&&token==null) {

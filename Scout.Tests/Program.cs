@@ -153,6 +153,7 @@ var episodes=new List<Episode>{new(1,2,1,"The Play","Two students rehearse a pla
 var blocks=new List<Block>{new(0,0,1,0,"We rehearse a play."),new(1,2,3,10,"We perform the play.")};
 JsonObject Response(bool verify=false)=>new() {
  ["assessment"]="supported",["summary"]="Students rehearse and perform.",
+ ["coverage"]="complete",
  ["candidate_checks"]=new JsonArray(new JsonObject {["episode_title"]="The Play",["supporting_blocks"]=new JsonArray(0,1),["contradicting_blocks"]=new JsonArray(),["event_comparison"]="The play is rehearsed.",["guide_event"]=verify?episodes[0].Overview:null}),
  ["matches"]=new JsonArray(new JsonObject{["episode_title"]="The Play",["reason"]="Rehearsal and performance."}),["alternatives"]=new JsonArray()
 };
@@ -229,8 +230,11 @@ Test("Unified server choice keeps loopback local and remote protected",()=>{
  var legacy=System.Text.Json.JsonSerializer.Deserialize<AppSettings>("{\"use_custom_runtime\":true,\"runtime_executable\":\"old.exe\"}",Data.Options)!;
  Assert(!System.Text.Json.JsonSerializer.Serialize(legacy,Data.Options).Contains("runtime_executable"));
 });
+VerificationTests.Run(Test);
 RuntimeTests.Run(Test,temp);
 SettingsTests.Run(Test,temp);
+TimeoutTests.Run(Test);
+ModelOutputQualityTests.Run(Test);
 DiscoveryTests.Run(Test,temp);
 if(args.Contains("--metadata-smoke"))DiscoveryTests.PublicSmoke(Test);
 if(args.Length>=3) {
@@ -256,7 +260,7 @@ sealed class FakeHandler : HttpMessageHandler {
  public List<JsonObject> Results=[];public List<JsonObject> Requests=[];
  protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct) {
   Requests.Add(JsonNode.Parse(await request.Content!.ReadAsStringAsync(ct))!.AsObject());
-  var result=Results[Requests.Count-1];
+  var result=VerificationTests.WireResponse(Requests[^1],Results[Requests.Count-1]);
   return new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(new JsonObject{["choices"]=new JsonArray(new JsonObject{["finish_reason"]="stop",["message"]=new JsonObject{["content"]=result.ToJsonString()}})}.ToJsonString())};
  }
 }

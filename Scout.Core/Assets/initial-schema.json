@@ -5,7 +5,7 @@
     "candidate_checks": {
       "type": "array",
       "minItems": 0,
-      "maxItems": 3,
+      "maxItems": 5,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -61,7 +61,7 @@
     },
     "matches": {
       "type": "array",
-      "maxItems": 1,
+      "maxItems": 2,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -106,6 +106,15 @@
           "reason_against"
         ]
       }
+    },
+    "coverage": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial",
+        "combined",
+        "unknown"
+      ]
     }
   },
   "required": [
@@ -113,6 +122,7 @@
     "assessment",
     "summary",
     "matches",
-    "alternatives"
+    "alternatives",
+    "coverage"
   ]
 }

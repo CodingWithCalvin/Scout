@@ -34,14 +34,21 @@ public sealed class RecordingGroup
 {
     public required string Id {get;init;}
     public required List<JsonObject> Rows {get;init;}
-    public Episode? Episode {get;set;}
+    public List<Episode> Episodes {get;set;}=[];
+    public Episode? Episode {get=>Episodes.FirstOrDefault();set=>Episodes=value==null?[]:[value];}
+    public int Part {get;set;}
+    public int PartCount {get;set;}
+    public JsonObject? SplitEvidence {get;set;}
+    public bool Combined=>Episodes.Count==2;
+    public bool Split=>PartCount==2&&Episode!=null;
     public string Status {get;set;}="unassigned";
     public List<Episode> Claims {get;init;}=[];
+    public List<string> CompetingRecordings {get;set;}=[];
     public bool Feature => Status=="unassigned" && Rows.All(r=>r["reasoning"].Text("assessment")=="non_episode");
     public bool Duplicate => Rows.Count>1;
-    public string Code=>Episode?.Code ?? "—";
-    public string Title=>Episode?.Title ?? (Feature?"Non-episode feature":"Unresolved");
-    public string Category=>Episode is not null?"Episode":Feature?"Feature":"Unresolved";
+    public string Code=>Combined?$"{Episodes[0].Code}-E{Episodes[1].Number:00}":Episode?.Code ?? "—";
+    public string Title=>Combined?string.Join(" / ",Episodes.Select(e=>e.Title)):Split?$"{Episode!.Title} (Part {Part} of {PartCount})":Episode?.Title ?? (Feature?"Non-episode feature":"Unresolved");
+    public string Category=>Combined?"Combined episodes":Split?"Split episode":Episode is not null?"Episode":Feature?"Feature":"Unresolved";
     public int Copies=>Rows.Count;
     public string Detail {get {var review=EvidenceReview.Create(this);return review.Assessment+"\n"+review.Suggestion+"\n\n"+string.Join("\n\n",review.Sections.Select(s=>s.Heading+"\n"+s.Text));}}
 }

@@ -25,6 +25,8 @@ public sealed class AppSettings
     public string DownloadProfile {get;set;}="qwen36-35b";
     public int CpuThreads {get;set;}=8;
     public int GpuLayers {get;set;}=0;
+    // Null preserves the selected model profile default; false explicitly disables thinking.
+    public bool? ThinkingEnabled {get;set;}
     public int ContextSize {get;set;}=24576;
     public int MaxOutputTokens {get;set;}=4096;
     public int RequestTimeoutSeconds {get;set;}=600;
@@ -34,6 +36,18 @@ public sealed class AppSettings
     [JsonIgnore] public string Endpoint=>Provider switch {"openai"=>"https://api.openai.com/v1/responses","compatible"=>CompatibleEndpoint,_=>LocalEndpoint};
     [JsonIgnore] public string Model=>Provider switch {"openai"=>OpenAiModel,"compatible"=>CompatibleModel,_=>LocalModel};
     [JsonIgnore] public string CredentialId=>Provider+"|"+Endpoint.Trim().TrimEnd('/');
+    [JsonIgnore] public bool ManagedThinking=>Provider=="managed"&&(ThinkingEnabled??((string.IsNullOrWhiteSpace(ModelFile)
+        ?ModelDownloads.Profiles.FirstOrDefault(p=>p.Id==DownloadProfile)
+        :ModelDownloads.Profiles.FirstOrDefault(p=>p.FileName.Equals(Path.GetFileName(ModelFile),StringComparison.OrdinalIgnoreCase)))?.EnableThinking==true));
+    // Gemma's rolling SWA cache cannot reliably roll back to the shared dialogue
+    // prefix after processing the catalog suffix. Retain that state on CPU.
+    [JsonIgnore] public bool ManagedFullSwaCache=>Provider=="managed"&&GpuLayers==0&&
+        (string.IsNullOrWhiteSpace(ModelFile)?ModelDownloads.Profiles.FirstOrDefault(p=>p.Id==DownloadProfile):
+        ModelDownloads.Profiles.FirstOrDefault(p=>p.FileName.Equals(Path.GetFileName(ModelFile),StringComparison.OrdinalIgnoreCase)))?.FullSwaCache==true;
+    [JsonIgnore] public int EffectiveContextSize=>ManagedThinking?Math.Max(ContextSize,32768):ContextSize;
+    [JsonIgnore] public int EffectiveOutputTokens=>ManagedThinking?Math.Max(MaxOutputTokens,8192):MaxOutputTokens;
+    [JsonIgnore] public int EffectiveTimeoutSeconds=>ManagedThinking?Math.Max(RequestTimeoutSeconds,7200):Provider=="managed"&&GpuLayers==0?Math.Max(RequestTimeoutSeconds,1800):RequestTimeoutSeconds;
+    public InferenceOptions Inference(string? key=null,int? outputTokenLimit=null)=>new(){Provider=Provider,ApiKey=key,AllowCloudDialogue=AllowCloudDialogue,EnableThinking=ManagedThinking,MaxOutputTokens=Math.Min(EffectiveOutputTokens,outputTokenLimit??EffectiveOutputTokens),MaxRequests=MaxRequestsPerRun};
     public void Validate() {
         Naming.Validate();
         if(MetadataProvider is not ("tvdb" or "tmdb" or "tvmaze"))throw new ArgumentException("Unknown metadata provider.");

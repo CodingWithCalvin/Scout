@@ -8,6 +8,7 @@ public static class FilenameCatalogMatcher
 {
     public static Episode? Match(string path,IReadOnlyList<Episode> catalog) {
         var name=Path.GetFileNameWithoutExtension(path);
+        if(Regex.IsMatch(name,@"(?i)\bpart[ ._-]*\d+(?:[ ._-]*of[ ._-]*\d+)?\b"))return null;
         var matches=Regex.Matches(name,@"(?i)(?<![a-z0-9])(?:S(?<s>\d{1,3})[ ._-]*E(?<e>\d{1,3})|(?<s>\d{1,3})x(?<e>\d{1,3}))(?!\d)");
         if(matches.Count!=1)return null;
         var m=matches[0];
@@ -19,14 +20,14 @@ public static class FilenameCatalogMatcher
         identity.Validate();
         if(PreviewPlanner.Within(output,root))throw new InvalidOperationException("Run storage must be outside the media folder.");
         if(paths.Count==0||paths.Any(p=>!PreviewPlanner.Within(p,root))||paths.Distinct(StringComparer.OrdinalIgnoreCase).Count()!=paths.Count)throw new ArgumentException("Select distinct source files within this Scout.");
-        var rows=new JsonArray();Directory.CreateDirectory(output);
+        var rows=new JsonArray();ScoutStorage.EnsureDirectory(output);
         Data.Save(Path.Combine(output,"catalog.json"),new{series_identity=identity,episodes=catalog});
         foreach(var path in paths) {
             ct.ThrowIfCancellationRequested();progress.Report("Matching filename and checking exact duplicates: "+Path.GetFileName(path));
             var row=new JsonObject{["path"]=Path.GetFullPath(path),["matching_method"]="filename_catalog",["candidates"]=new JsonArray()};
             try {
                 var episode=Match(path,catalog);
-                if(episode==null)row["reasoning"]=new JsonObject{["summary"]="No unique season/episode number in this filename and catalog. Leave unresolved; dialogue identification is optional."};
+                if(episode==null)row["reasoning"]=new JsonObject{["summary"]="No unique complete-episode assignment from this filename and catalog. Combined ranges and split-part labels need dialogue verification; leave unresolved."};
                 else {
                     var size=new FileInfo(path).Length;var mtime=PreviewPlanner.MtimeNs(path);var sampled=PreviewPlanner.SampledDigest(path);
                     await using var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read,65536,true);

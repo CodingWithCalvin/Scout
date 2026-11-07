@@ -16,7 +16,7 @@ public static class RuntimeDownloads
  }
 
  public static ModelProfile Profile(AppSettings settings) {
-  if(settings.DownloadProfile!="qwen36-35b")throw new InvalidOperationException("No managed runtime is registered for this model profile.");
+  if(!ModelDownloads.Profiles.Any(p=>p.Id==settings.DownloadProfile))throw new InvalidOperationException("No managed runtime is registered for this model profile.");
   var gpu=settings.GpuLayers>0;var backend=gpu?"vulkan":"cpu";
   var name=$"llama-{Version}-bin-win-{backend}-x64.zip";
   return new($"{Version}-{backend}",$"llama.cpp {Version} ({backend})",name,

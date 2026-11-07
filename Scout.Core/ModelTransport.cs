@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Encodings.Web;
 using System.Text.Json.Nodes;
 namespace Scout.Core;
 public sealed class InferenceOptions
@@ -8,19 +9,29 @@ public sealed class InferenceOptions
  public string Provider {get;init;}="local";
  public bool AllowCloudDialogue {get;init;}
  [System.Text.Json.Serialization.JsonIgnore] public string? ApiKey {get;init;}
+ public bool EnableThinking {get;init;}
  public int MaxOutputTokens {get;init;}=2800;
  public int MaxRequests {get;init;}=200;
 }
 public sealed class UsageLimitException():InvalidOperationException("Per-run request limit reached. Completed results are saved. Increase the limit in Settings to process more files.");
+public sealed class ModelRequestTimeoutException(TimeSpan limit,Exception inner):TimeoutException(
+ $"Model request timed out after {limit.TotalSeconds:0.###} seconds without a completed response. Increase the request timeout in Settings > Usage and tools before retrying this file.",inner)
+{
+ public double TimeoutSeconds=>limit.TotalSeconds;
+}
 public sealed record UsageSnapshot(int Requests,long InputTokens,long OutputTokens,string Provider);
 public sealed class ModelTransport(HttpClient client,InferenceOptions options)
 {
  private int requests;private long inputTokens,outputTokens;
- public string CacheScope=>$"{options.Provider}|{options.MaxOutputTokens}|responses-v1";
+ public string CacheScope=>$"{options.Provider}|{options.MaxOutputTokens}|thinking:{options.EnableThinking}|responses-v4-distinct-candidates";
  public UsageSnapshot Usage=>new(requests,inputTokens,outputTokens,options.Provider);
  public Uri ValidateEndpoint(string endpoint)=>ConnectionPolicy.Validate(options.Provider,endpoint,options.AllowCloudDialogue,options.ApiKey);
  private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct) {
   try{return await client.SendAsync(request,ct);}
+  catch(OperationCanceledException ex) when(!ct.IsCancellationRequested) {
+   if(ex.InnerException is TimeoutException)throw new ModelRequestTimeoutException(client.Timeout,ex);
+   throw new IOException("The model request was interrupted by the HTTP transport without a user cancellation. Retry this file after checking the model connection.",ex);
+  }
   catch(HttpRequestException ex) when(options.Provider is "local" or "managed"&&ex.InnerException is System.Net.Sockets.SocketException socket&&socket.SocketErrorCode==System.Net.Sockets.SocketError.ConnectionRefused) {
    throw new HttpRequestException(options.Provider=="local"
     ?"No local model server is listening. Settings > Connection is set to connect to an already-running server. Choose Let Scout Launch my Model to use a downloaded GGUF, or start your external server and check its endpoint."
@@ -32,23 +43,27 @@ public sealed class ModelTransport(HttpClient client,InferenceOptions options)
   if(options.MaxOutputTokens<512||options.MaxOutputTokens>65536||options.MaxRequests<2)throw new ArgumentException("Invalid inference limits.");
   if(requests>=options.MaxRequests)throw new UsageLimitException();
   bool responses=options.Provider=="openai",local=options.Provider is "local" or "managed";
+  // This JSON is prompt text inside an HTTP JSON string, never embedded HTML.
+  // Preserve literal dialogue characters; the outer serializer still escapes the wire payload.
+  var sourceText=source.ToJsonString(new JsonSerializerOptions{Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping});
   JsonObject payload;
   if(responses) {
    payload=new JsonObject{["model"]=model,["store"]=false,["max_output_tokens"]=options.MaxOutputTokens,
-    ["input"]=JsonSerializer.SerializeToNode(new[]{new{role="system",content=system},new{role="user",content=source.ToJsonString()}}),
+    ["input"]=JsonSerializer.SerializeToNode(new[]{new{role="system",content=system},new{role="user",content=sourceText}}),
     ["text"]=new JsonObject{["format"]=new JsonObject{["type"]="json_schema",["name"]="episode_match",["strict"]=true,["schema"]=schema.DeepClone()}}};
   }else{
    payload=new JsonObject{["model"]=model,["stream"]=false,
-    ["messages"]=JsonSerializer.SerializeToNode(new[]{new{role="system",content=system},new{role="user",content=source.ToJsonString()}}),
+    ["messages"]=JsonSerializer.SerializeToNode(new[]{new{role="system",content=system},new{role="user",content=sourceText}}),
     ["response_format"]=new JsonObject{["type"]="json_schema",["json_schema"]=new JsonObject{["name"]="episode_match",["strict"]=true,["schema"]=schema.DeepClone()}}};
    payload["max_tokens"]=options.MaxOutputTokens;
-   if(local){payload["temperature"]=0;payload["seed"]=42;payload["chat_template_kwargs"]=new JsonObject{["enable_thinking"]=false};}
+   if(options.Provider=="managed")payload["cache_prompt"]=true;
+   if(local){payload["temperature"]=0;payload["seed"]=42;payload["chat_template_kwargs"]=new JsonObject{["enable_thinking"]=options.EnableThinking};}
   }
   using var request=new HttpRequestMessage(HttpMethod.Post,uri){Content=JsonContent.Create(payload)};
   if(!local)request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",options.ApiKey);
   requests++;
   using var response=await SendAsync(request,ct);
-  if(!response.IsSuccessStatusCode)throw new HttpRequestException($"Model service returned HTTP {(int)response.StatusCode}. Check provider, model access, key and limits.",null,response.StatusCode);
+  if(!response.IsSuccessStatusCode)throw ModelRequestError.Create(response.StatusCode,await response.Content.ReadAsStringAsync(ct),system.Length+sourceText.Length,options.MaxOutputTokens);
   var body=JsonNode.Parse(await response.Content.ReadAsStringAsync(ct))??throw new InvalidDataException("Empty model response.");
   var usage=body["usage"];
   inputTokens+=usage?[responses?"input_tokens":"prompt_tokens"]?.GetValue<long>()??0;

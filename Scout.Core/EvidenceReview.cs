@@ -9,25 +9,50 @@ public sealed record EvidenceReview(string Assessment,string Suggestion,IReadOnl
    "unresolved_conflict"=>"Unresolved conflict — do not assign",
    "invalid_model_output"=>"Invalid model output — review required",
    "source_or_model_error"=>"Processing error — review required",
+   "partial_unverified"=>"Partial episode — complementary recording not verified",
+   _ when group.Combined=>"Combined episodes — dialogue supports two consecutive episodes",
+   _ when group.Split=>"Split episode — complementary parts independently verified",
    _ when group.Feature=>"Non-episode content suggested",
    _ when group.Episode!=null&&group.Rows.All(r=>r.Text("matching_method")=="reasoning"||r["reasoning"]!=null)=>"Dialogue supports this match — suggestion",
    _ when group.Episode!=null=>"Filename/catalog suggestion — content unverified",
    _=>"Uncertain — no episode assigned"
   };
-  var suggestion=group.Episode is {} episode?$"{episode.Code} · {episode.Title}":"No episode assignment";
+  var suggestion=group.Episode is {} episode?$"{group.Code} · {group.Title}":"No episode assignment";
   var sections=new List<EvidenceSection>();
   if(group.Status=="unresolved_conflict")sections.Add(new("Why this is held","Different recordings compete for the same episode, or duplicate copies disagree. Individual model suggestions below are not an accepted assignment."));
+  if(group.CompetingRecordings.Count>0)sections.Add(new("Competing recordings",string.Join("\n",group.CompetingRecordings)));
   if(group.Duplicate)sections.Add(new("Duplicate copies",$"{group.Copies} identical recordings share this review and one episode assignment."));
+  if(group.SplitEvidence is {} split) {
+   sections.Add(new("Verified split order",$"This recording is Part {group.Part} of {group.PartCount} of {group.Code}. Exact copies of this part are grouped separately from the other part."));
+   sections.Add(new("Continuity verification",split["verification"].Text("continuity")));
+   sections.Add(new("Why these are parts, not duplicates",split["verification"].Text("reason")));
+  }
   foreach(var row in group.Rows) {
    sections.Add(new("Recording",row.Text("path")));
    if(!string.IsNullOrWhiteSpace(row.Text("error")))sections.Add(new("Processing error",row.Text("error")));
+   if(row.Bool("move_pending"))sections.Add(new("Move needs reconciliation","Generate the move preview to verify the destination of an interrupted move. No assignment or further move is accepted until its location is verified."));
+   if(row.Text("relocation_error")!="")sections.Add(new("File location unresolved",row.Text("relocation_error")));
+   if(row.Array("path_history").Count>0)sections.Add(new("Verified path history",string.Join("\n",row.Array("path_history").Select(h=>h.Text("from")+" → "+h.Text("to")))));
    if(row.Bool("source_changed"))sections.Add(new("Source changed","This file changed during processing. Its previous suggestion cannot be used."));
+   if(row.Text("conflict_review_error")!="")sections.Add(new("Automated conflict review",row.Text("conflict_review_error")));
+   if(row.Bool("conflict_review_pending"))sections.Add(new("Automated conflict review","Paused or incomplete. Resume Scout to finish checking all competing recordings."));
+   if(row["conflict_review"]!=null)sections.Add(new("Automated conflict review","Re-evaluated against the full episode guide with two independent dialogue checks. Collection uniqueness rules still apply."));
+   if(row.Text("issue_review_reason")!="")sections.Add(new("Automated issue review","Included because: "+row.Text("issue_review_reason").Replace('_',' ')+". The current outcome is shown above; incomplete or inconclusive checks remain held."));
    var reasoning=row["reasoning"];
+   if(reasoning.Text("coverage")!="")sections.Add(new("Recording coverage",reasoning.Text("coverage")));
+   if(reasoning.Text("request_adjustments")!="")sections.Add(new("Request recovery",reasoning.Text("request_adjustments")));
    var modelAssessment=reasoning.Text("assessment");
    if(modelAssessment!="")sections.Add(new("Model assessment",modelAssessment switch {"supported"=>"Supported by dialogue (not a guarantee of correctness)","uncertain"=>"Uncertain — insufficient evidence","non_episode"=>"Likely non-episode content",_=>modelAssessment}));
    if(reasoning.Text("summary")!="")sections.Add(new("Dialogue summary",reasoning.Text("summary")));
    var cues=row["dialogue"].Array("cues").Select(n=>new Cue(n?["start"]?.GetValue<double>()??0,n.Text("text"))).ToList();
    var blocks=DialogueMatcher.Blocks(cues);
+   if(group.SplitEvidence is {} proof) {
+    var key=proof.Text("fingerprint_a")==CollectionResolver.FingerprintKey(row["primary_fingerprint"])?"evidence_a":"evidence_b";
+    foreach(var index in proof["verification"].Array(key)) {
+     var block=blocks.FirstOrDefault(b=>b.Index==index!.GetValue<int>());
+     if(block!=null)sections.Add(new("Split continuity evidence · "+Time(block.Start),block.SourceText));
+    }
+   }
    foreach(var candidate in row.Array("candidates")) {
     var e=candidate?["episode"] is {} node?Data.Episode(node):null;
     sections.Add(new("Suggested episode",e==null?"No episode details saved":$"{e.Code} · {e.Title}"));
