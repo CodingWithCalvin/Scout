@@ -3,7 +3,7 @@ namespace Scout.Core;
 public static class EpisodeGuidePreparation
 {
     public static async Task<List<Episode>> EnsureAsync(string path,SeriesIdentity? identity,IMetadataCatalog? provider,CancellationToken ct) {
-        if(File.Exists(path))return identity==null?Data.Catalog(path):SavedGuide.Episodes(path,identity);
+        if(ScoutStorage.Exists(path))return identity==null?Data.Catalog(path):SavedGuide.Episodes(path,identity);
         if(identity==null||provider==null)throw new InvalidOperationException("Select a show or import an episode guide before identifying episodes.");
         identity.Validate();
         var episodes=await provider.EpisodesAsync(identity.Id,ct);

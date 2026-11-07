@@ -80,17 +80,14 @@ public sealed class SettingsStore(string directory)
     }
     private string SettingsPath=>Path.Combine(directory,"settings.json");
     private string SecretsPath=>Path.Combine(directory,"credentials.dpapi");
-    public AppSettings Load()=>File.Exists(SettingsPath)?JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath),Data.Options)??new():new();
+    public AppSettings Load()=>ScoutStorage.Exists(SettingsPath)?JsonSerializer.Deserialize<AppSettings>(ScoutStorage.ReadText(SettingsPath),Data.Options)??new():new();
     public void Save(AppSettings settings){settings.Validate();Data.Save(SettingsPath,settings);}
-    private Dictionary<string,string> Keys()=>File.Exists(SecretsPath)?JsonSerializer.Deserialize<Dictionary<string,string>>(WindowsSecrets.Unprotect(File.ReadAllBytes(SecretsPath)))??[]:[];
+    private Dictionary<string,string> Keys()=>ScoutStorage.Exists(SecretsPath)?JsonSerializer.Deserialize<Dictionary<string,string>>(WindowsSecrets.Unprotect(ScoutStorage.ReadBytes(SecretsPath)))??[]:[];
     public string? ReadKey(string id)=>Keys().GetValueOrDefault(id);
     public void SetKey(string id,string? key) {
         var keys=Keys();if(string.IsNullOrWhiteSpace(key))keys.Remove(id);else keys[id]=key;
-        Directory.CreateDirectory(directory);
         var protectedBytes=WindowsSecrets.Protect(JsonSerializer.SerializeToUtf8Bytes(keys));
-        var temp=SecretsPath+"."+Guid.NewGuid().ToString("N")+".tmp";
-        try{File.WriteAllBytes(temp,protectedBytes);File.Move(temp,SecretsPath,true);}
-        finally{if(File.Exists(temp))File.Delete(temp);}
+        ScoutStorage.WriteBytes(SecretsPath,protectedBytes);
     }
 }
 public static class WindowsSecrets

@@ -6,16 +6,13 @@ namespace Scout.Core;
 public static class Data
 {
     public static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy=JsonNamingPolicy.SnakeCaseLower, WriteIndented=true };
-    public static JsonObject Read(string path) => JsonNode.Parse(File.ReadAllText(path))?.AsObject() ?? throw new InvalidDataException("Empty JSON.");
+    public static JsonObject Read(string path) => JsonNode.Parse(ScoutStorage.ReadText(path))?.AsObject() ?? throw new InvalidDataException("Empty JSON.");
     public static string Text(this JsonNode? node, string key, string fallback="") => node?[key]?.GetValue<string>() ?? fallback;
     public static int Int(this JsonNode? node,string key,int fallback=0) => node?[key]?.GetValue<int>() ?? fallback;
     public static bool Bool(this JsonNode? node,string key) => node?[key]?.GetValue<bool>() ?? false;
     public static JsonArray Array(this JsonNode? node,string key) => node?[key]?.AsArray() ?? [];
     public static void Save(string path,object value) {
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        var temp=path+"."+Guid.NewGuid().ToString("N")+".tmp";
-        try { File.WriteAllText(temp,JsonSerializer.Serialize(value,Options)); File.Move(temp,path,true); }
-        finally { if(File.Exists(temp)) File.Delete(temp); }
+        ScoutStorage.WriteText(path,JsonSerializer.Serialize(value,Options));
     }
     public static Episode Episode(JsonNode node) => node.Deserialize<Episode>(Options) ?? throw new InvalidDataException("Invalid episode.");
     public static List<Episode> Catalog(string path) {
