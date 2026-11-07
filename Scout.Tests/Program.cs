@@ -272,7 +272,9 @@ Test("Unified server choice keeps loopback local and remote protected",()=>{
  Assert(!System.Text.Json.JsonSerializer.Serialize(legacy,Data.Options).Contains("runtime_executable"));
 });
 VerificationTests.Run(Test);
+MultipartTests.Run(Test,temp);
 MoveTests.Run(Test,temp);
+DatabaseTests.Run(Test,temp);
 RuntimeTests.Run(Test,temp);
 SettingsTests.Run(Test,temp);
 TimeoutTests.Run(Test);
