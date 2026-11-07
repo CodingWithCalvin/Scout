@@ -10,6 +10,11 @@ public partial class MainWindow
  private readonly SettingsStore settingsStore=new(Environment.GetEnvironmentVariable("SCOUT_SETTINGS")??Path.Combine(SettingsStore.DefaultDirectory,"UI-Trial"));
  private AppSettings appSettings=new();
  private bool settingsDownload;
+ private bool loadingModelSettings;
+ private void SetContextPreset(object sender,RoutedEventArgs e) {
+  ContextEntry.Text=(string)((Button)sender).Tag;
+  SettingsStatus.Text="Context updated. Save settings to apply it on the next managed model launch.";
+ }
  private void RefreshManagedRuntime() {
   if(ManagedRuntimeStatus==null||ManagedRuntimePath==null||ManagedRuntimeUsage==null||GpuEntry==null||ModelFolderEntry==null||DownloadProfileChoice==null)return;
   ManagedRuntimeUsage.Text="Scout downloads, verifies and manages llama-server automatically.";
@@ -22,8 +27,36 @@ public partial class MainWindow
    ManagedRuntimeStatus.Text=installed.Status;ManagedRuntimePath.Text=installed.InstalledPath;
   }catch(Exception ex) when(ex is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException){ManagedRuntimeStatus.Text="Could not check managed runtime: "+ex.Message;ManagedRuntimePath.Clear();}
  }
- private void RuntimeLocationChanged(object sender,TextChangedEventArgs e)=>RefreshManagedRuntime();
- private void RuntimeProfileChanged(object sender,SelectionChangedEventArgs e)=>RefreshManagedRuntime();
+ private void RuntimeLocationChanged(object sender,TextChangedEventArgs e){RefreshManagedRuntime();RefreshRequestTimeoutHint();}
+ private void RuntimeProfileChanged(object sender,SelectionChangedEventArgs e) {
+  if(DownloadProfileChoice.SelectedItem is ModelProfile profile) {
+   if(ModelProfileHint!=null)ModelProfileHint.Text=profile.Status+" Download: "+(profile.Bytes/1e9).ToString("F1")+" GB. SHA256 verified."+(profile.EnableThinking?" Model default: thinking enabled. Override with the Thinking setting.":"");
+   if(!loadingModelSettings&&!refreshingLocalModels&&ModelFolderEntry!=null&&ModelFileEntry!=null) {
+    ModelFileEntry.Text=Path.Combine(ModelFolderEntry.Text.Trim(),profile.FileName);
+    ModelId.Text=Path.GetFileNameWithoutExtension(profile.FileName);
+    RefreshLocalModels();
+   }
+  }
+  RefreshManagedRuntime();RefreshThinkingHint();
+ }
+ private void ThinkingChanged(object sender,SelectionChangedEventArgs e)=>RefreshThinkingHint();
+ private void ThinkingModelChanged(object sender,TextChangedEventArgs e)=>RefreshThinkingHint();
+ private bool? SelectedThinking=>ThinkingChoice.SelectedIndex switch {1=>true,2=>false,_=>null};
+ private void RefreshThinkingHint() {
+  if(ThinkingHint==null||ThinkingChoice==null||ModelFileEntry==null||DownloadProfileChoice==null)return;
+  var settings=new AppSettings{Provider="managed",ThinkingEnabled=SelectedThinking,ModelFile=ModelFileEntry.Text.Trim(),DownloadProfile=(DownloadProfileChoice.SelectedItem as ModelProfile)?.Id??appSettings.DownloadProfile};
+  ThinkingHint.Text=settings.ManagedThinking
+   ?"Thinking is enabled: up to 2048 reasoning tokens, with at least 32768 context / 8192 output tokens and a 2-hour request timeout. Requires a model that supports thinking."
+   :"Thinking is disabled. Scout uses your context and output limits without a thinking budget. CPU-only requests still get at least 30 minutes.";
+  RefreshRequestTimeoutHint();
+ }
+ private void RequestTimeoutChanged(object sender,TextChangedEventArgs e)=>RefreshRequestTimeoutHint();
+ private void RefreshRequestTimeoutHint() {
+  if(RequestTimeoutHint==null||TimeoutEntry==null||ProviderChoice==null||GpuEntry==null||ThinkingChoice==null||ModelFileEntry==null||DownloadProfileChoice==null)return;
+  if(!int.TryParse(TimeoutEntry.Text,out var seconds)||!int.TryParse(GpuEntry.Text,out var layers)){RequestTimeoutHint.Text="Enter whole numbers for the request timeout and GPU layers.";return;}
+  var settings=new AppSettings{Provider=ProviderChoice.SelectedIndex==1?"managed":"local",GpuLayers=layers,RequestTimeoutSeconds=seconds,ThinkingEnabled=SelectedThinking,ModelFile=ModelFileEntry.Text.Trim(),DownloadProfile=(DownloadProfileChoice.SelectedItem as ModelProfile)?.Id??appSettings.DownloadProfile};
+  RequestTimeoutHint.Text=$"Effective timeout: {settings.EffectiveTimeoutSeconds/60.0:0.#} minutes per model request. "+(settings.ManagedThinking?"Thinking has a 2-hour minimum. ":settings.Provider=="managed"&&layers==0?"CPU-only processing has a 30-minute minimum. ":"")+"Timed-out files stay held for retry while other files continue.";
+ }
  private bool refreshingLocalModels;
  private void RefreshLocalModels() {
   if(ModelId==null||ModelFolderEntry==null||ModelFileEntry==null)return;
@@ -42,27 +75,34 @@ public partial class MainWindow
   if(refreshingLocalModels||ModelId.SelectedItem is not LocalModelFile model||ModelFileEntry==null)return;
   ModelFileEntry.Text=model.Path;ProviderChoice.SelectedIndex=1;
   var profile=ModelDownloads.Profiles.FirstOrDefault(p=>p.FileName.Equals(Path.GetFileName(model.Path),StringComparison.OrdinalIgnoreCase));
-  if(profile!=null)DownloadProfileChoice.SelectedItem=profile;
+  if(profile!=null) {
+   refreshingLocalModels=true;
+   try{DownloadProfileChoice.SelectedItem=profile;}finally{refreshingLocalModels=false;}
+  }
  }
 
  private void UpdateConnectionSummary() {
   var provider=appSettings.Provider switch {"managed"=>"Local · managed runtime","openai"=>"OpenAI","compatible"=>"Compatible API",_=>"Local endpoint"};
-  ConnectionSummary.Text=provider+" · "+(string.IsNullOrWhiteSpace(appSettings.Model)?"model not selected":appSettings.Model);
+  ConnectionSummary.Text=provider+" · "+(string.IsNullOrWhiteSpace(appSettings.Model)?"model not selected":appSettings.Model)+(appSettings.Provider=="managed"?" · "+(appSettings.GpuLayers==0?"CPU only":$"{appSettings.GpuLayers} GPU layers")+" · thinking "+(appSettings.ManagedThinking?"on":"off"):"");
  }
  private void LoadSettings() {
+  loadingModelSettings=true;
+  try {
   try{appSettings=settingsStore.Load();appSettings.Validate();}
   catch(Exception ex){SettingsStatus.Text="Settings could not be loaded: "+ex.Message;appSettings=new();}
   ShowProvider.SelectedIndex=appSettings.MetadataProvider switch{"tmdb"=>1,"tvmaze"=>2,_=>0};
   ModelId.Text=appSettings.LocalModel;Endpoint.Text=appSettings.LocalEndpoint;
   OpenAiModelEntry.Text=appSettings.OpenAiModel;CompatibleModelEntry.Text=appSettings.Provider=="local"?appSettings.LocalModel:appSettings.CompatibleModel;CompatibleEndpointEntry.Text=appSettings.Provider=="local"?appSettings.LocalEndpoint:appSettings.CompatibleEndpoint;
   CloudConsent.IsChecked=appSettings.AllowCloudDialogue;ModelFolderEntry.Text=appSettings.ModelDirectory;ModelFileEntry.Text=appSettings.ModelFile;
+  ThinkingChoice.SelectedIndex=appSettings.ThinkingEnabled switch {true=>1,false=>2,_=>0};
   ThreadsEntry.Text=appSettings.CpuThreads.ToString();GpuEntry.Text=appSettings.GpuLayers.ToString();ContextEntry.Text=appSettings.ContextSize.ToString();
   OutputTokensEntry.Text=appSettings.MaxOutputTokens.ToString();TimeoutEntry.Text=appSettings.RequestTimeoutSeconds.ToString();RequestsEntry.Text=appSettings.MaxRequestsPerRun.ToString();
   AllowDownloadsEntry.IsChecked=appSettings.AllowDownloads;AutoDownloadEntry.IsChecked=appSettings.AutoDownloadMissing;ExperimentalEntry.IsChecked=appSettings.AllowExperimental;
   DownloadProfileChoice.ItemsSource=ModelDownloads.Profiles;DownloadProfileChoice.SelectedItem=ModelDownloads.Profiles.FirstOrDefault(p=>p.Id==appSettings.DownloadProfile)??ModelDownloads.Profiles[0];
   FfmpegEntry.Text=appSettings.Ffmpeg;FfprobeEntry.Text=appSettings.Ffprobe;
   ProviderChoice.SelectedIndex=appSettings.Provider switch{"managed"=>1,"openai"=>2,"compatible"=>0,_=>0};
-  UpdateProviderPanels();RefreshKeyStatus();UpdateConnectionSummary();LoadNamingControls();RefreshLocalModels();RefreshManagedRuntime();
+  UpdateProviderPanels();RefreshKeyStatus();UpdateConnectionSummary();LoadNamingControls();RefreshLocalModels();RefreshManagedRuntime();RefreshThinkingHint();
+  } finally {loadingModelSettings=false;}
  }
  private string SelectedProvider=>ProviderChoice.SelectedIndex switch{1=>"managed",2=>"openai",_=>ConnectionPolicy.ServerProvider(CompatibleEndpointEntry.Text.Trim())};
  private void UpdateProviderPanels() {
@@ -73,7 +113,7 @@ public partial class MainWindow
   CompatiblePanel.Visibility=ProviderChoice.SelectedIndex==0?Visibility.Visible:Visibility.Collapsed;
   UpdateCloudPrivacyVisibility();
  }
- private void ProviderChanged(object sender,SelectionChangedEventArgs e)=>UpdateProviderPanels();
+ private void ProviderChanged(object sender,SelectionChangedEventArgs e){UpdateProviderPanels();RefreshRequestTimeoutHint();}
  private void ServerEndpointChanged(object sender,TextChangedEventArgs e)=>UpdateCloudPrivacyVisibility();
  private void UpdateCloudPrivacyVisibility() {
   if(CloudPrivacyPanel==null||ProviderChoice==null||CompatibleEndpointEntry==null)return;
@@ -91,6 +131,7 @@ public partial class MainWindow
    CompatibleModel=CompatibleModelEntry.Text.Trim(),CompatibleEndpoint=CompatibleEndpointEntry.Text.Trim(),AllowCloudDialogue=CloudConsent.IsChecked==true,
    ModelDirectory=ModelFolderEntry.Text.Trim(),ModelFile=ModelFileEntry.Text.Trim(),
    AllowDownloads=AllowDownloadsEntry.IsChecked==true,AutoDownloadMissing=AutoDownloadEntry.IsChecked==true,AllowExperimental=ExperimentalEntry.IsChecked==true,
+   ThinkingEnabled=SelectedThinking,
    CpuThreads=Number(ThreadsEntry,"CPU threads"),GpuLayers=Number(GpuEntry,"GPU layers"),ContextSize=Number(ContextEntry,"Context tokens"),
    MaxOutputTokens=Number(OutputTokensEntry,"Output token limit"),RequestTimeoutSeconds=Number(TimeoutEntry,"Request timeout"),MaxRequestsPerRun=Number(RequestsEntry,"Request limit"),
    Ffmpeg=FfmpegEntry.Text.Trim(),Ffprobe=FfprobeEntry.Text.Trim(),DownloadProfile=(DownloadProfileChoice.SelectedItem as ModelProfile)?.Id??"qwen36-35b"
@@ -102,7 +143,7 @@ public partial class MainWindow
   if(!string.IsNullOrWhiteSpace(OpenAiKeyEntry.Password))settingsStore.SetKey("openai|https://api.openai.com/v1/responses",OpenAiKeyEntry.Password.Trim());
   if(!string.IsNullOrWhiteSpace(CompatibleKeyEntry.Password))settingsStore.SetKey("compatible|"+settings.CompatibleEndpoint.TrimEnd('/'),CompatibleKeyEntry.Password.Trim());
   SaveMetadataKeys();settingsStore.Save(settings);
-  appSettings=settings;OpenAiKeyEntry.Clear();CompatibleKeyEntry.Clear();RefreshKeyStatus();UpdateConnectionSummary();
+  appSettings=settings;if(report!=null)RestorePreview();OpenAiKeyEntry.Clear();CompatibleKeyEntry.Clear();RefreshKeyStatus();UpdateConnectionSummary();
   SettingsStatus.Text="Settings saved. Keys are protected for this Windows account.";return settings;
  }
  private void SaveSettings(object sender,RoutedEventArgs e){if(operation==null)try{SaveSettingsCore();}catch(Exception ex){Error(ex);}}
@@ -142,7 +183,7 @@ public partial class MainWindow
     ModelFileEntry.Text=path;ProviderChoice.SelectedIndex=1;ModelId.Text=Path.GetFileNameWithoutExtension(path);RefreshLocalModels();
    }
    SaveSettingsCore();SettingsStatus.Text="Local runtime ready: "+executable+(includeModel?" · Model verified.":"");
-  }catch(OperationCanceledException){SettingsStatus.Text="Download cancelled. Partial downloads removed.";}
+  }catch(OperationCanceledException) when(operation?.IsCancellationRequested==true){SettingsStatus.Text="Download cancelled. Partial downloads removed.";}
   catch(Exception ex){SettingsStatus.Text="Download failed: "+ex.Message;}
   finally{operation?.Dispose();operation=null;settingsDownload=false;SetBusy(false);SettingsCancelButton.Visibility=Visibility.Collapsed;RefreshManagedRuntime();}
  }
