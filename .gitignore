@@ -20,3 +20,5 @@ models/
 *.srt
 *.vtt
 *.log
+**/__pycache__/
+*.py[cod]
