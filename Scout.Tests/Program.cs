@@ -127,6 +127,36 @@ Test("Custom naming is idempotent and recorded in the preview",()=>{
  Assert(plan.Items.Single().Action=="unchanged"&&plan.Naming.FileTemplate==options.FileTemplate);
  options.FileTemplate="{code} - {title}";Assert(plan.Naming.FileTemplate!=options.FileTemplate);
 });
+Test("Naming filters clean punctuation preserve codes and format multipart names",()=>{
+ var options=new NamingOptions{PreserveCorrectNames=false,FileTemplate="{series|fold|clean}.{code}.{title|fold|clean}",FileWordSeparator=".",FolderWordSeparator="_",CombinedTitleSeparator=" and "};options.Validate();
+ var first=new Episode(1,1,1,"Tori & Jade’s Playdate!");var second=new Episode(2,1,2,"Café: Next?");
+ Assert(options.FileName("My Show!",first)=="My.Show.S01E01.Tori.and.Jades.Playdate");
+ Assert(options.Folder("My Show",first)=="Season_01");
+ Assert(options.AssignmentName("My Show",[first,second])=="My.Show.S01E01-E02.Tori.and.Jades.Playdate.and.Cafe.Next");
+ Assert(options.AssignmentName("My Show",[first],1,2).EndsWith("(Part.1.of.2)"));
+ options.FileTemplate="{series|clean|lower}.{code}.{title|clean|underscores}";options.FileWordSeparator=" ";
+ Assert(options.FileName("MY SHOW",first)=="my show.S01E01.Tori_and_Jades_Playdate");
+ Throws(()=>new NamingOptions{FileTemplate="{series|unknown}.{code}.{title}"}.Validate());
+ Throws(()=>new NamingOptions{FileTemplate="{series}.{code|clean}.{title}"}.Validate());
+ Throws(()=>new NamingOptions{FileWordSeparator="../"}.Validate());
+ var path=Path.Combine(temp,"filter-settings");var store=new SettingsStore(path);store.Save(new(){Naming=options});
+ Assert(store.Load().Naming.CombinedTitleSeparator==" and "&&store.Load().Naming.FolderWordSeparator=="_");
+});
+Test("Move preview cache survives reopen and invalidates changed inputs sources and collisions",()=>{
+ var root=Path.Combine(temp,"preview-cache-media");Directory.CreateDirectory(root);var row=Row("preview-cache-media/original.mkv");var report=Report(row);
+ var options=new NamingOptions{PreserveCorrectNames=false,FileWordSeparator="."};var catalog=new[]{new Episode(1,2,1,"Title 1")};
+ var output=Path.Combine(temp,"preview-cache-db");var db=new ScoutDatabase(Path.Combine(temp,"preview-cache.db"));ScoutStorage.Register(output,db);
+ try {
+  var signature=PreviewCache.Signature(report,root,"Show",catalog,options,null);var plan=PreviewPlanner.Create(report,root,"Show",catalog,naming:options);
+  PreviewPlanner.Write(plan,output);PreviewCache.Save(output,signature,plan);
+  ScoutStorage.Unregister(output);ScoutStorage.Register(output,new ScoutDatabase(db.Path));
+  Assert(PreviewCache.Read(output,signature)?.Naming.FileWordSeparator=="."&&!Directory.Exists(output));
+  Assert(PreviewCache.Read(output,PreviewCache.Signature(report,root,"Show",catalog,new NamingOptions(),null))==null);
+  var changed=report.DeepClone().AsObject();changed["pipeline"]="different";Assert(PreviewCache.Read(output,PreviewCache.Signature(changed,root,"Show",catalog,options,null))==null);
+  var dest=plan.Items.Single().Destination!;Directory.CreateDirectory(Path.GetDirectoryName(dest)!);File.WriteAllText(dest,"new collision");Assert(PreviewCache.Read(output,signature)==null);File.Delete(dest);
+  Assert(PreviewCache.Read(output,signature)!=null);File.AppendAllText(row.Text("path"),"changed");Assert(PreviewCache.Read(output,signature)==null);
+ }finally{ScoutStorage.Unregister(output);}
+});
 Test("Naming templates reject traversal and missing identity",()=>{
  Throws(()=>new NamingOptions{SeasonTemplate="../Season {season}"}.Validate());
  Throws(()=>new NamingOptions{FileTemplate="{unknown} - {title}"}.Validate());
@@ -161,6 +191,17 @@ Test("Evidence resolves to original source",()=>{var r=Response();DialogueMatche
 Test("Wrong guide card rejected",()=>{var r=Response(true);r.Array("candidate_checks")[0]!["guide_event"]="Wrong";Throws(()=>DialogueMatcher.Validate(r,blocks,episodes,true));});
 Test("Unresolved contradiction rejected",()=>{var r=Response();r.Array("candidate_checks")[0]!["contradicting_blocks"]=new JsonArray(1);Throws(()=>DialogueMatcher.Validate(r,blocks,episodes,false));});
 Test("Single evidence block rejected",()=>{var r=Response();r.Array("candidate_checks")[0]!["supporting_blocks"]=new JsonArray(0);Throws(()=>DialogueMatcher.Validate(r,blocks,episodes,false));});
+Test("Resume reuses valid saved matches but rejects corrupt accepted prose",()=>{
+ var row=Row("quality-reuse.mkv");var result=Response(true);DialogueMatcher.Validate(result,blocks,episodes,true);result["method"]=DialogueMatcher.Version;
+ row["reasoning"]=result;row["candidates"]=new JsonArray(new JsonObject {["episode"]=JsonSerializer.SerializeToNode(episodes[0],Data.Options)});
+ Assert(RunRecovery.CanReuse(row,episodes));
+ result["summary"]=string.Concat(Enumerable.Repeat("la ",15));Assert(!RunRecovery.CanReuse(row,episodes));
+ result["summary"]="Students rehearse and perform.";
+ result["verification"]=new JsonObject {["initial_result"]=Response()};
+ result["verification"]!["initial_result"]!["summary"]=new string('_',50);Assert(!RunRecovery.CanReuse(row,episodes));
+ result.Remove("verification");result["validation_retries"]=new JsonArray(new JsonObject {["response"]=new JsonObject {["summary"]=new string('_',50)}});
+ Assert(RunRecovery.CanReuse(row,episodes));
+});
 Test("Two-pass HTTP contract",()=>{
  var handler=new FakeHandler();using var http=new HttpClient(handler);
  var matcher=new DialogueMatcher(http);var cues=Enumerable.Range(0,20).Select(i=>new Cue(i*5,"We rehearse the play "+i)).ToList();
@@ -231,6 +272,7 @@ Test("Unified server choice keeps loopback local and remote protected",()=>{
  Assert(!System.Text.Json.JsonSerializer.Serialize(legacy,Data.Options).Contains("runtime_executable"));
 });
 VerificationTests.Run(Test);
+MoveTests.Run(Test,temp);
 RuntimeTests.Run(Test,temp);
 SettingsTests.Run(Test,temp);
 TimeoutTests.Run(Test);

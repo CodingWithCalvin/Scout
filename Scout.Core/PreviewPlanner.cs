@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -10,6 +11,9 @@ public sealed class PlanItem
     public string? Destination {get;init;}
     public required string Category {get;init;}
     public Episode? Episode {get;init;}
+    public List<Episode> Episodes {get;init;}=[];
+    public int Part {get;init;}
+    public int PartCount {get;init;}
     public required string GroupId {get;init;}
     public string? PrimarySource {get;init;}
     public string Action {get;set;}="hold";
@@ -17,14 +21,16 @@ public sealed class PlanItem
     public string Reason {get;set;}="No resolved episode assignment.";
     public List<string> BlockedReasons {get;init;}=[];
     public List<string> Notes {get;init;}=[];
+    public string? LastMoveError {get;set;}
+    public string? CompletedAt {get;set;}
     public string? FeatureDescription {get;init;}
 }
 public sealed record MovePlan(string LibraryRoot,string Series,List<PlanItem> Items,List<Episode> NotIdentified)
 {
     public NamingOptions Naming {get;init;}=new();
     public SeriesIdentity? SeriesIdentity {get;init;}
-    public string Mode=>"preview_only";
-    public bool MediaFilesModified=>false;
+    public string Mode=>"move_plan";
+    public bool MediaFilesModified=>Items.Any(i=>i.Action=="completed");
     public Dictionary<string,int> Summary=>Items.GroupBy(i=>i.Category).ToDictionary(g=>g.Key,g=>g.Count());
     public Dictionary<string,int> Actions=>Items.GroupBy(i=>i.Action).ToDictionary(g=>g.Key,g=>g.Count());
 }
@@ -48,36 +54,36 @@ public static class PreviewPlanner
         return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
     public static long MtimeNs(string path)=>(File.GetLastWriteTimeUtc(path).Ticks-DateTime.UnixEpoch.Ticks)*100;
-    private static bool HasReparseAncestor(string path) {
+    public static bool HasReparseAncestor(string path) {
         for(var current=Path.GetFullPath(path);current!=null;current=Path.GetDirectoryName(current))
             if((File.Exists(current)||Directory.Exists(current))&&(File.GetAttributes(current)&FileAttributes.ReparsePoint)!=0)return true;
         return false;
     }
-    public static MovePlan Create(JsonObject report,string root,string series,IReadOnlyList<Episode>? catalog=null,bool checkSources=true,NamingOptions? naming=null,SeriesIdentity? identity=null) {
+    public static MovePlan Create(JsonObject report,string root,string series,IReadOnlyList<Episode>? catalog=null,bool checkSources=true,NamingOptions? naming=null,SeriesIdentity? identity=null,IReadOnlySet<string>? verifyOnly=null) {
         naming??=new();naming.Validate();identity?.Validate();
         root=Path.GetFullPath(root);series=SafeName(series);
         if(string.IsNullOrWhiteSpace(series))throw new ArgumentException("Series name required.");
         var items=new List<PlanItem>();
         foreach(var group in CollectionResolver.Resolve(report)) {
             var e=group.Episode;string folder=e is null?"Extras":naming.Folder(series,e,identity);
-            string basename=e is null?SafeName(series+" - Non-episode feature"):naming.FileName(series,e,identity);
+            string basename=e is null?SafeName(series+" - Non-episode feature"):naming.AssignmentName(series,group.Episodes,group.Part,group.PartCount,identity);
             string Canonical(JsonObject r)=>Path.Combine(root,folder,basename+Path.GetExtension(r.Text("path")).ToLowerInvariant());
-            bool CorrectName(string path)=>e!=null&&(string.Equals(Path.GetFileNameWithoutExtension(path),basename,StringComparison.OrdinalIgnoreCase)||NamingOptions.Inspect(path,series,e,identity).Correct);
-            bool CorrectFolder(string path)=>e!=null&&Path.GetDirectoryName(Path.GetDirectoryName(path)) is string parent&&Same(parent,root)&&NamingOptions.CorrectFolder(path,series,e,naming,identity);
-            var rows=group.Rows.OrderByDescending(r=>e!=null&&(Same(r.Text("path"),Canonical(r))||naming.PreserveCorrectNames&&CorrectName(r.Text("path"))&&CorrectFolder(r.Text("path"))))
+            bool CorrectName(string path)=>e!=null&&(string.Equals(Path.GetFileNameWithoutExtension(path),basename,StringComparison.OrdinalIgnoreCase)||(group.Combined||group.Split?naming.EquivalentAssignmentName(path,series,group.Episodes,group.Part,group.PartCount,identity):NamingOptions.Inspect(path,series,e,identity).Correct));
+            bool CorrectFolder(string path)=>e!=null&&(Same(Path.GetDirectoryName(path)!,Path.Combine(root,folder))||Path.GetDirectoryName(Path.GetDirectoryName(path)) is string parent&&Same(parent,root)&&NamingOptions.CorrectFolder(path,series,e,naming,identity));
+            var rows=group.Rows.OrderBy(r=>r.Text("duplicate_of")!="").ThenByDescending(r=>e!=null&&(Same(r.Text("path"),Canonical(r))||naming.PreserveCorrectNames&&CorrectName(r.Text("path"))&&CorrectFolder(r.Text("path"))))
                 .ThenByDescending(r=>r.Array("candidates").FirstOrDefault()?["filename_evidence"].Bool("number_match")==true&&r.Array("candidates").FirstOrDefault()?["filename_evidence"].Bool("title_match")==true)
                 .ThenBy(r=>r.Text("path"),StringComparer.OrdinalIgnoreCase).ToList();
             for(int index=0;index<rows.Count;index++) {
                 var row=rows[index];var source=Path.GetFullPath(row.Text("path"));var suffix=Path.GetExtension(source).ToLowerInvariant();
-                var token=CollectionResolver.Hash(source.ToLowerInvariant())[..10];bool duplicate=index>0;
+                var token=CollectionResolver.Hash(Path.GetFullPath(row.Text("original_path",source)).ToLowerInvariant())[..10];bool duplicate=index>0;
                 string? target=e is not null ? (duplicate?Path.Combine(root,"_Duplicates",folder,basename+$" [duplicate-{token}]"+suffix):Canonical(row)):
                     group.Feature?Path.Combine(duplicate?Path.Combine(root,"_Duplicates","Extras"):Path.Combine(root,"Extras"),basename+$" [{token}]"+suffix):null;
                 if(e!=null&&!duplicate&&naming.PreserveCorrectNames) {
                     var destinationFolder=CorrectFolder(source)?Path.GetDirectoryName(source)!:Path.Combine(root,folder);
                     target=Path.Combine(destinationFolder,CorrectName(source)?Path.GetFileName(source):basename+suffix);
                 }
-                var item=new PlanItem {Source=source,Destination=target,Episode=e,GroupId=group.Id,PrimarySource=group.Duplicate?rows[0].Text("path"):null,
-                    Category=target is null?"unresolved":duplicate?"duplicate":e is not null?"episode":"feature",
+                var item=new PlanItem {Source=source,Destination=target,Episode=e,Episodes=group.Episodes.ToList(),Part=group.Part,PartCount=group.PartCount,GroupId=group.Id,PrimarySource=group.Duplicate?rows[0].Text("path"):null,
+                    Category=target is null?"unresolved":duplicate?"duplicate":group.Combined?"combined":group.Split?"split":e is not null?"episode":"feature",
                     FeatureDescription=group.Feature?row["reasoning"].Text("summary"):null,
                     Action=target is null?"hold":Same(source,target)?"unchanged":"rename/move"};
                 if(target!=null) {
@@ -98,14 +104,18 @@ public static class PreviewPlanner
                         if(moved&&item.Change!="Folder move")item.Reason+=" Also move to the selected season folder.";
                     }
                 }
+                if(e!=null&&!duplicate&&(group.Combined||group.Split)) {
+                    if(item.Change is "Episode correction" or "Episode naming")item.Change=group.Combined?"Combined episode naming":"Split episode naming";
+                    item.Reason+=" "+(group.Combined?$"Dialogue verifies both {group.Code}: {group.Title}. Retain as one file.":$"Independent dialogue verification confirms {group.Code}, part {group.Part} of {group.PartCount}. Retain each part separately.");
+                }
                 if(!Within(source,root))item.BlockedReasons.Add("Source is outside the selected library.");
                 if(target is not null&&(!Within(target,root)||HasReparseAncestor(target)||HasReparseAncestor(source)))
                     item.BlockedReasons.Add("Path leaves the library or traverses a junction/symbolic link; review required.");
                 if(duplicate&&target is not null)item.Notes.Add(row["primary_fingerprint"].Text("algorithm")=="full-file-sha256-v1"?"Exact byte-for-byte duplicate. Retain this copy separately.":"Identical primary video/audio. Retain this copy; other tracks and metadata can differ.");
                 if(group.Duplicate)item.Notes.Add("Primary chosen by canonical path, filename agreement, then path order; not a quality ranking.");
-                if((row["duration"]?.GetValue<double>()??0)>2100)item.Notes.Add("Long recording: leading episode only; additional segments may be present.");
-                if(target is null)item.Notes.Add("Unresolved match: leave in place.");
-                if(target is not null&&checkSources) {
+                if((row["duration"]?.GetValue<double>()??0)>2100&&!group.Combined&&!group.Split&&row["reasoning"].Text("method")!=DialogueMatcher.Version)item.Notes.Add("Legacy long-recording result: rerun dialogue matching to check for combined episodes.");
+                if(target is null){item.Reason=row.Text("error") is {Length:>0} error?error:$"Unresolved assignment ({group.Status}). Review the dialogue evidence.";item.Notes.Add("Unresolved match: leave in place.");}
+                if(target is not null&&checkSources&&(verifyOnly==null||verifyOnly.Contains(source))) {
                     var fp=row["primary_fingerprint"];
                     try {
                         if(!File.Exists(source))item.BlockedReasons.Add("Source is unavailable.");
@@ -134,22 +144,33 @@ public static class PreviewPlanner
                 }
             }
         }while(changed);
-        var assigned=items.Where(i=>i.Episode!=null).Select(i=>i.Episode!.Id).ToHashSet();
-        return new(root,series,items,(catalog??[]).Where(e=>e.Season>0&&!assigned.Contains(e.Id)).ToList()){SeriesIdentity=identity,Naming=new(){PreserveCorrectNames=naming.PreserveCorrectNames,FileTemplate=naming.FileTemplate,SeasonTemplate=naming.SeasonTemplate}};
+        var assigned=items.Where(i=>i.Episode!=null).SelectMany(i=>i.Episodes.Select(e=>e.Id)).ToHashSet();
+        foreach(var item in items) {
+            var last=report.Array("moves").LastOrDefault(m=>PreviewPlanner.Same(m.Text("source"),item.Source));
+            if(last?.Text("state") is "failed" or "attention")item.LastMoveError=last.Text("error");
+        }
+        foreach(var move in report.Array("moves").Where(m=>m.Text("state")=="completed")) {
+            if(move?["item"]?.Deserialize<PlanItem>(Data.Options) is not {} done)continue;
+            items.RemoveAll(i=>i.Action=="unchanged"&&PreviewPlanner.Same(i.Source,move.Text("destination")));
+            done.Action="completed";done.CompletedAt=move.Text("completed_at");done.Reason="Moved successfully at "+done.CompletedAt+". Saved analysis follows the new path.";
+            items.Add(done);
+        }
+
+        return new(root,series,items,(catalog??[]).Where(e=>e.Season>0&&!assigned.Contains(e.Id)).ToList()){SeriesIdentity=identity,Naming=new(){PathTemplate=naming.PathTemplate,PreserveCorrectNames=naming.PreserveCorrectNames,FileTemplate=naming.FileTemplate,SeasonTemplate=naming.SeasonTemplate,FileWordSeparator=naming.FileWordSeparator,FolderWordSeparator=naming.FolderWordSeparator,CombinedTitleSeparator=naming.CombinedTitleSeparator}};
     }
     public static string Write(MovePlan plan,string output) {
         if(Within(output,plan.LibraryRoot))throw new InvalidOperationException("Preview output must be outside the video library.");
-        Directory.CreateDirectory(output);Data.Save(Path.Combine(output,"plan.json"),plan);
-        var h=new StringBuilder("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Scout move preview</title><style>body{font:15px Segoe UI,system-ui;background:#111722;color:#eaf0f7;margin:40px}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{text-align:left;padding:16px;border-bottom:1px solid #344258;overflow-wrap:anywhere;vertical-align:top}h1{font-size:32px}p,a{color:#80dfca}</style><h1>Rename and move preview</h1><p>Preview only. No media files or folders changed. Duplicate copies are retained.</p>");
+        ScoutStorage.EnsureDirectory(output);Data.Save(Path.Combine(output,"plan.json"),plan);
+        var h=new StringBuilder("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Scout move preview</title><style>body{font:15px Segoe UI,system-ui;background:#111722;color:#eaf0f7;margin:40px}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{text-align:left;padding:16px;border-bottom:1px solid #344258;overflow-wrap:anywhere;vertical-align:top}h1{font-size:32px}p,a{color:#80dfca}</style><h1>Rename and move preview</h1><p>Pending moves require explicit selection in Scout. Completed moves are listed below. Duplicate copies are retained.</p>");
         string E(string? s)=>WebUtility.HtmlEncode(s??"");
         foreach(var group in plan.Items.GroupBy(i=>i.Category)) {
             h.Append("<h2>").Append(E(group.Key)).Append(" · ").Append(group.Count()).Append("</h2><table><tr><th>Current file</th><th>Proposed location</th><th>Action / evidence</th></tr>");
-            foreach(var i in group)h.Append("<tr><td>").Append(E(i.Source)).Append("</td><td>").Append(E(i.Destination??"Leave in place")).Append("</td><td>").Append(E(i.Action+" · "+i.Change)).Append("<br>").Append(E(i.Reason)).Append("<br>").Append(E(string.Join(" ",i.BlockedReasons.Concat(i.Notes)))).Append("<br>").Append(E(i.FeatureDescription)).Append("</td></tr>");
+            foreach(var i in group)h.Append("<tr><td>").Append(E(i.Source)).Append("</td><td>").Append(E(i.Destination??"Leave in place")).Append("</td><td>").Append(E(i.Action+" · "+i.Change)).Append("<br>").Append(E(i.Reason+(i.LastMoveError==null?"":" Last attempt: "+i.LastMoveError))).Append("<br>").Append(E(string.Join(" ",i.BlockedReasons.Concat(i.Notes)))).Append("<br>").Append(E(i.FeatureDescription)).Append("</td></tr>");
             h.Append("</table>");
         }
-        h.Append("<h2>Not identified in this scan</h2><p>This does not prove absence: combined recordings may contain additional episodes.</p><ul>");
+        h.Append("<h2>Not identified in this scan</h2><p>This does not prove absence: unresolved recordings may contain additional episodes.</p><ul>");
         foreach(var e in plan.NotIdentified)h.Append("<li>").Append(E(e.Code+" — "+e.Title)).Append("</li>");
         h.Append("</ul><a href='plan.json'>Machine-readable plan</a></html>");
-        var path=Path.Combine(output,"preview.html");File.WriteAllText(path,h.ToString());return path;
+        var path=Path.Combine(output,"preview.html");ScoutStorage.WriteText(path,h.ToString());return path;
     }
 }
