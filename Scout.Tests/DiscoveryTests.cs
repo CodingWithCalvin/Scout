@@ -158,13 +158,30 @@ static class DiscoveryTests
             var folder=Path.Combine(root,"Unknown");Directory.CreateDirectory(folder);var file=Path.Combine(folder,"title00.mkv");File.WriteAllText(file,"");
             var discovery=new ShowDiscovery(new DiscoveryCatalog(),(exe,_,_)=>Task.FromResult(exe=="probe"?"""{"streams":[{"index":1,"codec_type":"subtitle","codec_name":"subrip"}]}""":"1\n00:00:00,000 --> 00:00:02,000\nHello character\n\n2\n00:01:00,000 --> 00:01:02,000\nDistinctive location\n"));
             int calls=0;
-            Task<JsonObject> Infer(List<DiscoveryDialogue> blocks,List<ShowCandidate> candidates,CancellationToken ct){calls++;Check(blocks.Count==2);return Task.FromResult(JsonNode.Parse(candidates.Count==0?"""{"shows":[{"name":"Show","evidence_indices":[0,1]}]}""":"""{"assessment":"supported","key":"tvdb:12","reason":"Distinctive evidence","evidence_indices":[0,1]}""")!.AsObject());}
+            Task<JsonObject> Infer(List<DiscoveryDialogue> blocks,List<ShowCandidate> candidates,CancellationToken ct){calls++;Check(blocks.Count==2);return Task.FromResult(JsonNode.Parse(candidates.Count==0?"""{"shows":[{"name":"Show","evidence_indices":[0,1]}]}""":"""{"reason":"Distinctive evidence","evidence_indices":[0,1],"candidate_index":0}""")!.AsObject());}
             var result=discovery.DiscoverAsync(folder,"probe","ffmpeg",Infer,new Progress<string>(),default,[file]).Result;
             Check(calls==2&&result.Candidates.Single().DialogueSupported&&result.Candidates[0].Evidence.Any(e=>e.Contains("Distinctive location")));
         });
+        test("Automatic discovery samples at most two distinct videos",()=>{
+            Check(ShowDiscovery.RandomSample([]).Count==0);
+            Check(ShowDiscovery.RandomSample(["a","a"]).SequenceEqual(["a"]));
+            var files=Enumerable.Range(0,20).Select(i=>$"episode{i}.mkv").ToList();var sample=ShowDiscovery.RandomSample(files);
+            Check(sample.Count==2&&sample.Distinct().Count()==2&&sample.All(files.Contains)&&files.Count==20);
+        });
+        test("Required AI discovery verifies dialogue even when folder ID and filename agree",()=>{
+            var folder=Path.Combine(root,"Show {tvdb-12}");Directory.CreateDirectory(folder);var file=Path.Combine(folder,"Show.S01E01.mkv");File.WriteAllText(file,"");
+            var discovery=new ShowDiscovery(new DiscoveryCatalog(),(exe,_,_)=>Task.FromResult(exe=="probe"?"""{"streams":[{"index":1,"codec_type":"subtitle","codec_name":"subrip"}]}""":"1\n00:00:00,000 --> 00:00:02,000\nHello character\n\n2\n00:01:00,000 --> 00:01:02,000\nDistinctive location\n"));
+            int calls=0;
+            Task<JsonObject> Infer(List<DiscoveryDialogue> blocks,List<ShowCandidate> candidates,CancellationToken ct){calls++;return Task.FromResult(JsonNode.Parse(candidates.Count==0?"""{"shows":[{"name":"Show","evidence_indices":[0,1]}]}""":"""{"reason":"Distinctive evidence","evidence_indices":[0,1],"candidate_index":0}""")!.AsObject());}
+            var result=discovery.DiscoverAsync(folder,"probe","ffmpeg",Infer,new Progress<string>(),default,[file],requireDialogue:true).Result;
+            Check(calls==1&&result.Candidates.Single().DialogueSupported);
+            var unavailable=new ShowDiscovery(new DiscoveryCatalog(),(_,_,_)=>Task.FromResult("{}"));
+            result=unavailable.DiscoverAsync(folder,"probe","ffmpeg",Infer,new Progress<string>(),default,[file],requireDialogue:true).Result;
+            Check(result.Candidates.All(c=>!c.DialogueSupported)&&calls==1);
+        });
         test("Discovery rejects fabricated model evidence and IDs",()=>{
             Reject(()=>ShowDiscovery.Hypotheses(JsonNode.Parse("""{"shows":[{"name":"Show","evidence_indices":[0,100]}]}""")!.AsObject(),2));
-            Reject(()=>ShowDiscovery.SupportedCandidate(JsonNode.Parse("""{"assessment":"supported","key":"tvdb:999","evidence_indices":[0,1]}""")!.AsObject(),[new(){Series=new("tvdb","12","Show")}],[new(0,"file",0,"a"),new(1,"file",1,"b")]));
+            Reject(()=>ShowDiscovery.SupportedCandidate(JsonNode.Parse("""{"reason":"Evidence","evidence_indices":[0,1],"candidate_index":999}""")!.AsObject(),[new(){Series=new("tvdb","12","Show")}],[new(0,"file",0,"a"),new(1,"file",1,"b")]));
         });
         test("Clue-only discovery never extracts dialogue or calls a model",()=>{
             var folder=Path.Combine(root,"clue-only");Directory.CreateDirectory(folder);var file=Path.Combine(folder,"title00.mkv");File.WriteAllText(file,"");
@@ -174,8 +191,76 @@ static class DiscoveryTests
         });
         test("Mixed-show dialogue evidence does not produce a supported identity",()=>{
             var candidates=new List<ShowCandidate>{new(){Series=new("tvdb","12","Show")}};
-            var response=JsonNode.Parse("""{"assessment":"uncertain","key":"","reason":"mixed shows","evidence_indices":[]}""")!.AsObject();
+            var response=JsonNode.Parse("""{"reason":"mixed shows","evidence_indices":[],"candidate_index":-1}""")!.AsObject();
             Check(ShowDiscovery.SupportedCandidate(response,candidates,[new(0,"a",0,"one"),new(1,"b",0,"two")])==null);
+        });
+        test("Hints-only discovery needs neither model nor subtitle extraction and requires explicit confirmation",()=>{
+            var folder=Path.Combine(root,"Show {tvdb-12}");Directory.CreateDirectory(folder);var file=Path.Combine(folder,"Show.S01E01.mkv");File.WriteAllText(file,"");
+            var discovery=new ShowDiscovery(new DiscoveryCatalog(),(exe,_,_)=>{Check(exe=="probe");return Task.FromResult("{}");});
+            var result=discovery.DiscoverAsync(folder,"probe","ffmpeg",(_,_,_)=>throw new Exception("Hints must not invoke AI"),new Progress<string>(),default,[file],hintsOnly:true).GetAwaiter().GetResult();
+            Check(result.Candidates.Single().CluesAgree&&!result.Candidates.Single().DialogueSupported&&result.ConfirmedSeriesKey==null&&result.Dialogue.Count==0);
+            Reject(()=>ShowDiscovery.ConfirmHint(result,"tvdb:999"));
+            var selected=ShowDiscovery.ConfirmHint(result,"tvdb:12");
+            Check(result.ConfirmedSeriesKey==selected.Series.Key&&!selected.DialogueSupported&&selected.Evidence.Any(e=>e.Contains("Confirmed by the user")));
+        });
+        test("Compact hinted verification checks both recordings and preserves original evidence positions",()=>{
+            var folder=Path.Combine(root,"Show {tvdb-12}");Directory.CreateDirectory(folder);
+            var files=new[]{"Show.S01E01.mkv","Show.S01E02.mkv"}.Select(n=>Path.Combine(folder,n)).ToList();foreach(var file in files)File.WriteAllText(file,"");
+            var srt=string.Join("\n\n",Enumerable.Range(0,36).Select(i=>$"{i+1}\n00:{i:00}:00,000 --> 00:{i:00}:02,000\nDistinctive character {i}"));
+            var discovery=new ShowDiscovery(new DiscoveryCatalog(),(exe,_,_)=>Task.FromResult(exe=="probe"?"""{"streams":[{"index":1,"codec_type":"subtitle","codec_name":"subrip"}]}""":srt));
+            int calls=0;
+            Task<JsonObject> Infer(List<DiscoveryDialogue> blocks,List<ShowCandidate> candidates,CancellationToken ct){calls++;Check(candidates.Count==1&&blocks.Count==12&&blocks[^1].Start==2100&&blocks.Select(d=>d.Index).SequenceEqual(Enumerable.Range(0,12)));return Task.FromResult(JsonNode.Parse("""{"reason":"Characters and setting agree","evidence_indices":[0,11],"candidate_index":0}""")!.AsObject());}
+            var result=discovery.DiscoverAsync(folder,"probe","ffmpeg",Infer,new Progress<string>(),default,files,requireDialogue:true).GetAwaiter().GetResult();
+            Check(calls==2&&result.Dialogue.Count==72&&result.Candidates.Single().DialogueSupported&&result.Candidates.Single().Evidence.Any(e=>e.Contains("2100.0s")));
+        });
+        test("Hints-only search with no candidates offers no invented identity",()=>{
+            var folder=Path.Combine(root,"Unknown");Directory.CreateDirectory(folder);var file=Path.Combine(folder,"title00.mkv");File.WriteAllText(file,"");
+            var discovery=new ShowDiscovery(new DiscoveryCatalog(),(exe,_,_)=>{Check(exe=="probe");return Task.FromResult("{}");});
+            var result=discovery.DiscoverAsync(folder,"probe","ffmpeg",(_,_,_)=>throw new Exception("Unexpected inference"),new Progress<string>(),default,[file],hintsOnly:true).GetAwaiter().GetResult();
+            Check(result.Candidates.Count==0&&result.ConfirmedSeriesKey==null&&result.Dialogue.Count==0);
+        });
+        test("Conflicting AI decisions across samples remain unresolved with the compact route",()=>{
+            var folder=Path.Combine(root,"Show {tvdb-12}");Directory.CreateDirectory(folder);
+            var files=new[]{"Show.S01E01.mkv","Show.S01E02.mkv"}.Select(n=>Path.Combine(folder,n)).ToList();foreach(var file in files)File.WriteAllText(file,"");
+            var discovery=new ShowDiscovery(new RemakeCatalog(),(exe,_,_)=>Task.FromResult(exe=="probe"?"""{"streams":[{"index":1,"codec_type":"subtitle","codec_name":"subrip"}]}""":"1\n00:00:00,000 --> 00:00:02,000\nDistinctive character\n\n2\n00:01:00,000 --> 00:01:02,000\nDistinctive place\n"));
+            int calls=0;
+            Task<JsonObject> Infer(List<DiscoveryDialogue> blocks,List<ShowCandidate> candidates,CancellationToken ct){Check(candidates.Count==2);return Task.FromResult(new JsonObject{["reason"]="Names and setting match this version",["evidence_indices"]=new JsonArray(0,1),["candidate_index"]=calls++});}
+            var result=discovery.DiscoverAsync(folder,"probe","ffmpeg",Infer,new Progress<string>(),default,files,requireDialogue:true).GetAwaiter().GetResult();
+            Check(calls==2&&result.Candidates.All(c=>!c.DialogueSupported)&&result.Status.StartsWith("Different recordings"));
+        });
+        test("Uncertain compact check expands evidence without treating hints as a decision",()=>{
+            var folder=Path.Combine(root,"Show {tvdb-12}");Directory.CreateDirectory(folder);var file=Path.Combine(folder,"Show.S01E01.mkv");File.WriteAllText(file,"");
+            var srt=string.Join("\n\n",Enumerable.Range(0,36).Select(i=>$"{i+1}\n00:{i:00}:00,000 --> 00:{i:00}:02,000\nDistinctive character {i}"));
+            var discovery=new ShowDiscovery(new DiscoveryCatalog(),(exe,_,_)=>Task.FromResult(exe=="probe"?"""{"streams":[{"index":1,"codec_type":"subtitle","codec_name":"subrip"}]}""":srt));
+            int calls=0;
+            Task<JsonObject> Infer(List<DiscoveryDialogue> blocks,List<ShowCandidate> candidates,CancellationToken ct){calls++;Check(blocks.Count==(calls==1?12:36));Check(calls==2?candidates.Count==0:candidates.Count>0);return Task.FromResult(JsonNode.Parse(calls==2?"""{"shows":[]}""":"""{"reason":"Insufficient distinctive evidence","evidence_indices":[],"candidate_index":-1}""")!.AsObject());}
+            var result=discovery.DiscoverAsync(folder,"probe","ffmpeg",Infer,new Progress<string>(),default,[file],requireDialogue:true).GetAwaiter().GetResult();
+            Check(calls==3&&result.Candidates.All(c=>!c.DialogueSupported));
+        });
+        test("Series decisions reject contradictory legacy verdicts and fabricated or repeated citations",()=>{
+            var candidates=new List<ShowCandidate>{new(){Series=new("tvdb","12","Show")}};var dialogue=new List<DiscoveryDialogue>{new(0,"file",0,"a"),new(1,"file",1,"b")};
+            foreach(var json in new[]{
+                """{"assessment":"uncertain","key":"","reason":"The dialogue matches this show","evidence_indices":[0,1],"candidate_index":0}""",
+                """{"reason":"Matches","evidence_indices":[0,0],"candidate_index":0}""",
+                """{"reason":"Matches","evidence_indices":[0,2],"candidate_index":0}""",
+                """{"reason":"Matches","evidence_indices":[0,1],"candidate_index":0.5}"""})
+                Reject(()=>ShowDiscovery.SupportedCandidate(JsonNode.Parse(json)!.AsObject(),candidates,dialogue));
+            var verbose=new JsonObject{["reason"]=new string('x',451),["evidence_indices"]=new JsonArray(0,1),["candidate_index"]=0};
+            Reject(()=>ShowDiscovery.SupportedCandidate(verbose,candidates,dialogue));
+        });
+        test("Series request makes one index decision after its comparison and retries invalid output once",()=>{
+            var candidates=new List<ShowCandidate>{new(){Series=new("tvdb","12","Show")}};var dialogue=new List<DiscoveryDialogue>{new(0,"file",0,"Name"),new(1,"file",1,"Location")};
+            var replies=new Queue<string>(new[]{"""{"reason":"" ,"evidence_indices":[],"candidate_index":0}""","""{"reason":"Character and location agree","evidence_indices":[0,1],"candidate_index":0}"""});
+            var handler=new TestHandler(_=>Response(new JsonObject{["choices"]=new JsonArray(new JsonObject{["finish_reason"]="stop",["message"]=new JsonObject{["content"]=replies.Dequeue()}})}.ToJsonString()));using var http=new HttpClient(handler);
+            var s=new AppSettings{Provider="managed",DownloadProfile="gemma4-31b",ThinkingEnabled=false};var options=s.Inference(outputTokenLimit:ShowDiscovery.OutputTokenLimit(s.ManagedThinking));
+            var response=ShowDiscovery.InferAsync(new ModelTransport(http,options),"m",s.Endpoint,dialogue,candidates,default).GetAwaiter().GetResult();
+            Check(handler.Requests.Count==2&&response.Int("candidate_index")==0&&handler.Requests[0].Int("max_tokens")==768);
+            var schema=handler.Requests[0]["response_format"]!["json_schema"]!["schema"]!;
+            Check(schema["properties"]!.AsObject().Select(x=>x.Key).SequenceEqual(new[]{"reason","evidence_indices","candidate_index"}));
+            Check(!handler.Requests[0]["messages"]!.ToJsonString().Contains("tvdb:12"));
+            Check(handler.Requests[0]["messages"]![1]!.ToJsonString()==handler.Requests[1]["messages"]![1]!.ToJsonString());
+            var cache=ShowDiscovery.CacheKey("m",s.Endpoint,options,dialogue,candidates);s.ThinkingEnabled=true;
+            Check(cache!=ShowDiscovery.CacheKey("m",s.Endpoint,s.Inference(outputTokenLimit:ShowDiscovery.OutputTokenLimit(s.ManagedThinking)),dialogue,candidates));
         });
         test("Discovery inference schemas parse and never request model IDs in hypotheses",()=>{
             var handler=new TestHandler(_=>Response("""{"choices":[{"finish_reason":"stop","message":{"content":"{\"shows\":[]}"}}]}"""));using var http=new HttpClient(handler);
@@ -189,6 +274,12 @@ static class DiscoveryTests
         public Task<List<SeriesIdentity>> SearchAsync(string title,CancellationToken ct)=>throw new NotSupportedException();
         public Task<SeriesIdentity?> GetAsync(string id,CancellationToken ct)=>throw new NotSupportedException();
         public Task<List<Episode>> EpisodesAsync(string id,CancellationToken ct){Calls++;return Task.FromResult(new List<Episode>{new(1,1,1,"Pilot")});}
+    }
+    private sealed class RemakeCatalog:IMetadataCatalog {
+        public string Provider=>"tvdb";
+        public Task<List<SeriesIdentity>> SearchAsync(string title,CancellationToken ct)=>Task.FromResult(new List<SeriesIdentity>{new("tvdb","12","Show","2000"),new("tvdb","13","Show","2020")});
+        public Task<SeriesIdentity?> GetAsync(string id,CancellationToken ct)=>Task.FromResult<SeriesIdentity?>(new("tvdb",id,"Show","2000"));
+        public Task<List<Episode>> EpisodesAsync(string id,CancellationToken ct)=>Task.FromResult(new List<Episode>());
     }
     private sealed class DiscoveryCatalog:IMetadataCatalog
     {
